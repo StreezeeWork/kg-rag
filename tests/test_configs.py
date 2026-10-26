@@ -77,3 +77,18 @@ def test_chunking_steps_of_the_grid_really_change_the_chunks() -> None:
             f"{name_a} и {name_b} отличаются только секцией chunking, но индексируют одинаковые "
             "фрагменты: такой шаг абляции ничего не проверяет"
         )
+
+
+@pytest.mark.parametrize("name", ["default.yaml", "offline.yaml"])
+def test_calibration_hint_in_config_mentions_save_flag(name: str) -> None:
+    """Регрессия: комментарий советовал `kbrag eval --config …` без `--save-calibration`.
+
+    Без флага файл калибровки не создаётся, и сервис молча работает без порога отказа.
+    """
+    hints = [
+        line
+        for line in (CONFIGS / name).read_text(encoding="utf-8").splitlines()
+        if "kbrag eval --config" in line
+    ]
+    assert hints, "в конфиге должна быть подсказка, как откалибровать порог для сервиса"
+    assert all("--save-calibration" in line for line in hints)

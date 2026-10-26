@@ -48,7 +48,8 @@ generation:
 
 abstention:
   enabled: true         # лучше честно сказать «нет ответа», чем уверенно выдумать
-  threshold: auto       # порог уверенности подбирается на dev-выборке при `kbrag eval`, а не «на глаз»
+  threshold: auto       # порог подбирается на dev при `kbrag eval`, а не «на глаз»; в файл для сервиса
+                        # его пишет только `kbrag eval --config configs/offline.yaml --save-calibration`
   score_source: auto    # без реранкера уверенность берётся из dense-score (он сравним между вопросами)
   calibration_path: reports/calibration_offline.json  # отдельный файл: калибровка зависит от конфига поиска
 
