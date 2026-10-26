@@ -72,9 +72,9 @@ abstention:
   threshold: auto       # порог подбирается на dev; сервису его сохраняет `make eval CONFIG=configs/default.yaml NAME=neural`
                         # (то же: `kbrag eval --config configs/default.yaml --save-calibration`; без флага файла не будет,
                         # и сервис будет отвечать без отказов по порогу)
-  score_source: auto    # auto: с реранкером — score cross-encoder, иначе косинус dense. Какой источник лучше отделяет
-                        # «нет ответа», показывает AUROC в leaderboard (поле confidence_auroc в results.json):
-                        # источник выбирают по dev, а не «по умолчанию точнее»
+  score_source: dense   # уверенность = лучший косинус e5 среди фрагментов. Выбрано по AUROC на dev (поле
+                        # confidence_auroc в results.json): dense 0.79 > bm25 0.77 > rerank 0.74 — реранкер лучше
+                        # упорядочивает фрагменты, но его score хуже отделяет вопросы без ответа. По test не выбираем.
   calibration_path: reports/calibration.json  # сервис читает порог отсюда, если конфиг поиска не менялся
 
 guardrails:
