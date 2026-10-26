@@ -4,7 +4,13 @@
 
 * ``results.json`` — конфиги, метрики, пороги и статистика индекса всех экспериментов;
 * ``per_question/<name>.jsonl`` — ответ и метрики по каждому вопросу (для разбора ошибок);
-* ``leaderboard.md`` — сводная таблица и разбивка Recall@5 по типам вопросов.
+* ``leaderboard.md`` — две таблицы (поиск; ответы и отказы), разбивка Recall@5 по типам
+  вопросов, отдельная проверка типа confusable и легенда «как читать».
+
+Почему таблиц две. Метрики поиска (Recall@5, MRR, …) от порога отказа не зависят. Метрики
+ответа — зависят: отказ на отвечаемый вопрос даёт FactRecall = 0, а порог у каждого
+эксперимента свой. Если положить их в одну строку без FAR, разница в FactRecall выглядит
+как разница в качестве генерации, хотя на деле это разница в пороге.
 
 Что воспроизводимо, а что нет. Отчёт не содержит даты, поэтому при повторном прогоне с тем же
 конфигом **метрики качества, пороги и ответы** совпадают байт в байт. Тайминги — нет:
@@ -26,31 +32,49 @@ from kbrag.eval.dataset import QUESTION_TYPES
 from kbrag.eval.results import BY_TYPE_KEY, ExperimentResult
 
 # (заголовок столбца, имя метрики) — порядок задаёт порядок столбцов.
-LEADERBOARD_COLUMNS: tuple[tuple[str, str], ...] = (
+# Поиск: от порога отказа не зависит.
+SEARCH_COLUMNS: tuple[tuple[str, str], ...] = (
     ("Recall@5", "recall@5"),
     ("MRR", "mrr"),
     ("nDCG@5", "ndcg@5"),
     ("Hit@1", "hit@1"),
-    ("FactRecall", "fact_recall"),
-    ("CitationPrecision", "citation_precision"),
-    ("Abstention F1", "abstain_f1"),
     ("p50, мс", "latency_p50_ms"),
     ("p95, мс", "latency_p95_ms"),
 )
+# Ответы и отказы: зависят от порога, поэтому рядом всегда FAR и сам порог.
+ANSWER_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("FactRecall (отвеч.)", "fact_recall_answered"),
+    ("FactRecall", "fact_recall"),
+    ("CitationPrecision", "citation_precision"),
+    ("Архивные ссылки", "stale_citation_rate"),
+    ("Abstention F1", "abstain_f1"),
+    ("FAR", "false_abstention_rate"),
+)
 SORT_METRIC = "recall@5"
+CONFUSABLE_TYPE = "confusable"
 MISSING = "—"
 
-_LEGEND = """## Как читать таблицу
+_LEGEND = """## Как читать таблицы
 
+Поиск:
 - **Recall@5** — доля доказательств (цитат из эталона), найденных среди первых 5 фрагментов. Главная метрика поиска.
-- **MRR** — 1 / позиция первого релевантного фрагмента, усреднённое по вопросам.
+- **MRR** — 1 / позиция первого релевантного фрагмента, усреднённое по вопросам. Считается по всей оцениваемой выдаче (max(k_values, top_k) фрагментов, по умолчанию 10), то есть фактически это MRR@10.
 - **nDCG@5** — учитывает позиции всех найденных доказательств: чем выше, тем лучше.
 - **Hit@1** — доля вопросов, где первый же фрагмент релевантен.
-- **FactRecall** — доля ключевых фактов эталона, которые есть в ответе.
-- **CitationPrecision** — доля ссылок `[n]` в ответе, ведущих на фрагмент с доказательством.
-- **Abstention F1** — насколько точно система отказывается отвечать на вопросы, ответа на которые в базе нет.
 - **p50 / p95, мс** — медианная и «хвостовая» задержка ответа. Это один прогон на этой машине без прогрева: от запуска к запуску цифры заметно гуляют, поэтому годятся только для грубого сравнения строк одного отчёта.
-- **Порог** — порог уверенности поиска для отказа (подобран на dev; «—» — без порога).
+- **N** — вопросов в сплите: отвечаемые + неотвечаемые. Метрики поиска считаются только по отвечаемым.
+
+Ответы и отказы:
+- **FactRecall (отвеч.)** — доля ключевых фактов эталона в ответе, только по вопросам, где система ответила. По этому столбцу сравнивают качество генерации.
+- **FactRecall** — то же, но сквозное: отказ на отвечаемый вопрос считается за 0. Поэтому оно зависит от порога, а порог у каждого эксперимента свой: высокий FAR опускает FactRecall при хорошем качестве ответов.
+- **CitationPrecision** — доля ссылок `[n]`, ведущих на фрагмент с доказательством. Считается по отвеченным отвечаемым вопросам (их доля = 1 − FAR); ответ без единой ссылки = 0.
+- **Архивные ссылки** — доля отвеченных вопросов, где ответ ссылается на архивную редакцию документа, которой нет в эталоне (меньше — лучше).
+- **Abstention F1** — насколько точно система отказывается отвечать на вопросы, ответа на которые в базе нет.
+- **FAR** (false abstention rate) — доля отвечаемых вопросов, на которые система зря отказалась (меньше — лучше).
+- **Порог** — шкала и значение порога уверенности для отказа; «—» — без порога. Подбирается на dev по balanced accuracy отдельно для каждого эксперимента. Шкалы разные: `bm25` — сырой BM25-score (растёт с длиной вопроса, порог по нему грубый), `dense` — косинус, `rerank` — score cross-encoder; числа разных шкал несравнимы.
+
+Общее:
+- Это описательное сравнение (абляция) на test. Боевые конфиги (`configs/offline.yaml`, `configs/default.yaml`) зафиксированы заранее, а не выбраны по этой таблице. Если выбрать конфиг по test-строкам, его test-метрики станут оптимистично смещёнными: выбирают по dev (dev-метрики есть в `results.json`), а test используют один раз — для подтверждения. Выборки маленькие, поэтому разница в 1–2 вопроса — шум.
 - **—** — метрика не определена (например, не было ни одного отказа).
 """
 
@@ -149,41 +173,144 @@ def _types_in_report(results: Sequence[ExperimentResult]) -> list[str]:
     return known + sorted(present - set(QUESTION_TYPES))
 
 
+def _counts(metrics: dict) -> tuple[int, int] | None:
+    """(отвечаемых, неотвечаемых) из метрик сплита; None для старых отчётов без n_answerable."""
+    n_questions, n_answerable = metrics.get("n_questions"), metrics.get("n_answerable")
+    if isinstance(n_questions, int) and isinstance(n_answerable, int):
+        return n_answerable, n_questions - n_answerable
+    return None
+
+
+def _format_n(metrics: dict) -> str:
+    """«124 + 15»: отвечаемые (знаменатель метрик поиска) + неотвечаемые."""
+    counts = _counts(metrics)
+    return f"{counts[0]} + {counts[1]}" if counts else format_number(metrics.get("n_questions"))
+
+
+def _format_threshold(result: ExperimentResult) -> str:
+    """«dense: 0.499» — без шкалы порог 20.5 (BM25) рядом с 0.5 (косинус) сбивает с толку."""
+    value = format_number(result.threshold)
+    if result.threshold is None or not result.score_source:
+        return value
+    return f"{result.score_source}: {value}"
+
+
+def _intro(done: Sequence[ExperimentResult], split: str) -> str:
+    text = f"Метрики посчитаны на сплите `{split}`"
+    counts = _counts(done[0].metrics.get(split, {})) if done else None
+    if counts and counts[0]:
+        answerable, unanswerable = counts
+        text += (
+            f": {answerable + unanswerable} вопросов, из них {answerable} отвечаемых (по ним считаются"
+            f" метрики поиска) и {unanswerable} неотвечаемых. Один отвечаемый вопрос ≈ "
+            f"{1 / answerable:.3f} Recall@5"
+        )
+    return text + ". Строки отсортированы по Recall@5 (по убыванию)."
+
+
+def _threshold_note(done: Sequence[ExperimentResult], split: str) -> list[str]:
+    """Напоминание, на какой маленькой выборке подобран порог (он общий для всего сплита dev)."""
+    counts = _counts(done[0].metrics.get("dev", {})) if done and split != "dev" else None
+    if not counts:
+        return []
+    answerable, unanswerable = counts
+    return [
+        f"Порог подбирается на dev: {answerable} отвечаемых и {unanswerable} неотвечаемых вопросов."
+        " По такой выборке он шумный, поэтому сравнивайте FactRecall вместе с FAR.",
+        "",
+    ]
+
+
+def _by_type_section(done: Sequence[ExperimentResult]) -> list[str]:
+    types = _types_in_report(done)
+    if not types:
+        return []
+    headers: list[str] = []
+    sizes: list[int] = []
+    for qtype in types:
+        # n — отвечаемые вопросы типа (знаменатель Recall@5); у всех экспериментов он обычно общий.
+        found = {r.metrics.get(BY_TYPE_KEY, {}).get(qtype, {}).get("n_answerable") for r in done} - {None}
+        if len(found) == 1:
+            size = int(found.pop())
+            sizes.append(size)
+            headers.append(f"{qtype} (n={size})")
+        else:
+            headers.append(qtype)  # старый отчёт без n_answerable или разные эталоны
+    rows = [
+        [_escape_cell(r.name)]
+        + [format_number(r.metrics.get(BY_TYPE_KEY, {}).get(qtype, {}).get(SORT_METRIC)) for qtype in types]
+        for r in done
+    ]
+    lines = ["", "## Recall@5 по типам вопросов", ""]
+    if sizes and min(sizes) > 0:
+        smallest = min(sizes)
+        lines += [
+            f"В маленьких группах один вопрос заметно двигает метрику: при n = {smallest} это ≈ "
+            f"{1 / smallest:.2f} Recall@5, так что различия в 1–2 вопроса здесь — шум.",
+            "",
+        ]
+    return lines + _table(["Эксперимент", *headers], rows)
+
+
+def _confusable_section(done: Sequence[ExperimentResult]) -> list[str]:
+    """Отдельная проверка типа confusable: Recall@5 не видит путаницы версий документа."""
+
+    def metrics(result: ExperimentResult) -> dict:
+        return result.metrics.get(BY_TYPE_KEY, {}).get(CONFUSABLE_TYPE, {})
+
+    if not any(metrics(r).get("stale_citation_rate") is not None for r in done):
+        return []
+    rows = [
+        [_escape_cell(r.name)]
+        + [
+            format_number(metrics(r).get(name))
+            for name in (SORT_METRIC, "fact_recall_answered", "stale_citation_rate")
+        ]
+        for r in done
+    ]
+    return [
+        "",
+        "## Тип confusable: не путает ли система редакции документа",
+        "",
+        "Recall@5 здесь обычно 1.0: нужный документ найден. Но если ответ ссылается ещё и на архивную"
+        " редакцию, пользователь получает две противоречивые цифры, а FactRecall этого не замечает"
+        " (нужный факт в ответе есть). Видно это только по «Архивным ссылкам».",
+        "",
+        *_table(["Эксперимент", "Recall@5", "FactRecall (отвеч.)", "Архивные ссылки"], rows),
+    ]
+
+
 def render_leaderboard(results: Sequence[ExperimentResult], split: str = "test") -> str:
     """Собирает текст ``leaderboard.md`` (без записи на диск — удобно тестировать)."""
     done = sorted((r for r in results if not r.is_skipped), key=lambda r: _sort_key(r, split))
     skipped = [r for r in results if r.is_skipped]
 
-    lines = [
-        "# Leaderboard",
-        "",
-        f"Метрики посчитаны на сплите `{split}`. Строки отсортированы по Recall@5 (по убыванию).",
-        "",
-    ]
+    lines = ["# Leaderboard", "", _intro(done, split), ""]
     if done:
-        header = ["Эксперимент"] + [title for title, _ in LEADERBOARD_COLUMNS] + ["Порог", "N"]
+        lines += ["## Поиск и задержка (от порога отказа не зависят)", ""]
+        header = ["Эксперимент"] + [title for title, _ in SEARCH_COLUMNS] + ["N"]
         rows = [
             [_escape_cell(r.name)]
-            + [format_number(r.metric(metric, split)) for _, metric in LEADERBOARD_COLUMNS]
-            + [format_number(r.threshold), format_number(r.metric("n_questions", split))]
+            + [format_number(r.metric(metric, split)) for _, metric in SEARCH_COLUMNS]
+            + [_format_n(r.metrics.get(split, {}))]
+            for r in done
+        ]
+        lines += _table(header, rows)
+
+        lines += ["", "## Ответы и отказы (зависят от порога отказа)", "", *_threshold_note(done, split)]
+        header = ["Эксперимент"] + [title for title, _ in ANSWER_COLUMNS] + ["Порог"]
+        rows = [
+            [_escape_cell(r.name)]
+            + [format_number(r.metric(metric, split)) for _, metric in ANSWER_COLUMNS]
+            + [_format_threshold(r)]
             for r in done
         ]
         lines += _table(header, rows)
     else:
         lines.append("Нет завершённых экспериментов.")
 
-    types = _types_in_report(done)
-    if types:
-        lines += ["", "## Recall@5 по типам вопросов", ""]
-        rows = [
-            [_escape_cell(r.name)]
-            + [
-                format_number(r.metrics.get(BY_TYPE_KEY, {}).get(qtype, {}).get(SORT_METRIC))
-                for qtype in types
-            ]
-            for r in done
-        ]
-        lines += _table(["Эксперимент", *types], rows)
+    lines += _by_type_section(done)
+    lines += _confusable_section(done)
 
     if skipped:
         lines += ["", "## Пропущенные эксперименты", ""]

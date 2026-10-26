@@ -22,7 +22,15 @@ from kbrag.eval.results import ExperimentResult, metric_names, retrieval_metric_
 def split_metrics(recall5: float, **overrides) -> dict:
     """Плоский словарь метрик сплита: всё по умолчанию 0.5, кроме заданного."""
     metrics = {name: 0.5 for name in metric_names()}
-    metrics.update({"recall@5": recall5, "n_questions": 4, "latency_p50_ms": 12.3456, "latency_p95_ms": 40.0})
+    metrics.update(
+        {
+            "recall@5": recall5,
+            "n_questions": 4,
+            "n_answerable": 3,
+            "latency_p50_ms": 12.3456,
+            "latency_p95_ms": 40.0,
+        }
+    )
     metrics.update(overrides)
     return metrics
 
@@ -43,6 +51,7 @@ def make_result(name: str, recall5: float, by_type: dict | None = None, **overri
         ],
         threshold=0.4242,
         index_stats={"n_docs": 4, "n_chunks": 12},
+        score_source="dense",
     )
 
 
@@ -201,23 +210,17 @@ def test_per_question_jsonl_content(tmp_path: Path, results: list[ExperimentResu
     assert "календарных" in raw  # кириллица не экранирована — файл удобно читать глазами
 
 
-def test_leaderboard_main_table(tmp_path: Path, results: list[ExperimentResult]) -> None:
+def section(markdown: str, title: str) -> str:
+    """Текст раздела ``## title`` до следующего заголовка второго уровня."""
+    return markdown.split(f"## {title}", 1)[1].split("\n## ", 1)[0]
+
+
+def test_leaderboard_search_table(tmp_path: Path, results: list[ExperimentResult]) -> None:
     text = write_report(results, tmp_path).read_text(encoding="utf-8")
-    rows = table_rows(text, "Эксперимент")
+    rows = table_rows(section(text, "Поиск и задержка"), "Эксперимент")
     header, separator, body = rows[0], rows[1], rows[2:]
 
-    assert header[:10] == [
-        "Эксперимент",
-        "Recall@5",
-        "MRR",
-        "nDCG@5",
-        "Hit@1",
-        "FactRecall",
-        "CitationPrecision",
-        "Abstention F1",
-        "p50, мс",
-        "p95, мс",
-    ]
+    assert header == ["Эксперимент", "Recall@5", "MRR", "nDCG@5", "Hit@1", "p50, мс", "p95, мс", "N"]
     assert set("".join(separator)) <= set("-:|")  # строка-разделитель markdown-таблицы
     # Сортировка по Recall@5: hybrid (0.9) выше bm25 (0.8); пропущенного эксперимента в таблице нет.
     assert [row[0] for row in body] == ["hybrid", "bm25"]
@@ -225,10 +228,59 @@ def test_leaderboard_main_table(tmp_path: Path, results: list[ExperimentResult])
     assert hybrid["Recall@5"] == "0.900"
     assert hybrid["MRR"] == "0.333"
     assert hybrid["p50, мс"] == "12.346"
-    assert hybrid["Порог"] == "0.424"
-    assert hybrid["N"] == "4"
+    assert hybrid["N"] == "3 + 1"  # отвечаемые + неотвечаемые: N для поиска — первое число
+
+
+def test_leaderboard_answer_table_shows_threshold_effects(
+    tmp_path: Path, results: list[ExperimentResult]
+) -> None:
+    # Регрессия: FactRecall стоял без FAR и без FactRecall по отвеченным, а порог — без шкалы,
+    # поэтому разница в пороге выглядела как разница в качестве генерации.
+    text = write_report(results, tmp_path).read_text(encoding="utf-8")
+    rows = table_rows(section(text, "Ответы и отказы"), "Эксперимент")
+    header, body = rows[0], rows[2:]
+
+    assert header == [
+        "Эксперимент",
+        "FactRecall (отвеч.)",
+        "FactRecall",
+        "CitationPrecision",
+        "Архивные ссылки",
+        "Abstention F1",
+        "FAR",
+        "Порог",
+    ]
+    assert [row[0] for row in body] == ["hybrid", "bm25"]  # тот же порядок строк, что в таблице поиска
+    hybrid = dict(zip(header, body[0], strict=True))
+    assert hybrid["Порог"] == "dense: 0.424"  # шкала уверенности рядом с числом
+    assert hybrid["FAR"] == "0.500"
     bm25 = dict(zip(header, body[1], strict=True))
     assert bm25["Abstention F1"] == "—"  # None выводится прочерком, а не «None» или 0
+    assert "отказ на отвечаемый вопрос считается за 0" in text  # легенда объясняет FactRecall
+
+
+def test_leaderboard_intro_and_threshold_note_show_sample_sizes(results: list[ExperimentResult]) -> None:
+    text = render_leaderboard(results)
+    assert "4 вопросов, из них 3 отвечаемых" in text
+    assert "Один отвечаемый вопрос ≈ 0.333 Recall@5" in text
+    assert "Порог подбирается на dev: 3 отвечаемых и 1 неотвечаемых" in text
+
+
+def test_leaderboard_threshold_without_score_source_is_plain_number() -> None:
+    result = make_result("old", 0.5)
+    result.score_source = None  # отчёт, записанный до появления поля
+    rows = table_rows(section(render_leaderboard([result]), "Ответы и отказы"), "Эксперимент")
+    assert rows[2][-1] == "0.424"
+
+
+def test_leaderboard_confusable_section(results: list[ExperimentResult]) -> None:
+    assert "## Тип confusable" not in render_leaderboard(results)  # нет данных — нет раздела
+
+    confusable = {"recall@5": 1.0, "fact_recall_answered": 1.0, "stale_citation_rate": 0.5}
+    text = render_leaderboard([make_result("hybrid", 0.9, by_type={"confusable": confusable})])
+    rows = table_rows(section(text, "Тип confusable"), "Эксперимент")
+    assert rows[0] == ["Эксперимент", "Recall@5", "FactRecall (отвеч.)", "Архивные ссылки"]
+    assert rows[2] == ["hybrid", "1.000", "1.000", "0.500"]
 
 
 def test_leaderboard_by_type_table(tmp_path: Path, results: list[ExperimentResult]) -> None:
@@ -241,6 +293,16 @@ def test_leaderboard_by_type_table(tmp_path: Path, results: list[ExperimentResul
     assert rows[0] == ["Эксперимент", "numeric", "keyword"]
     assert rows[2] == ["hybrid", "1.000", "0.667"]
     assert rows[3] == ["bm25", "1.000", "0.500"]
+
+
+def test_leaderboard_by_type_shows_group_sizes() -> None:
+    by_type = {"keyword": {"recall@5": 10 / 11, "n_answerable": 11, "n_questions": 11}}
+    text = render_leaderboard(
+        [make_result("a", 0.9, by_type=by_type), make_result("b", 0.8, by_type=by_type)]
+    )
+    by_type_section = section(text, "Recall@5 по типам вопросов")
+    assert table_rows(by_type_section, "Эксперимент")[0] == ["Эксперимент", "keyword (n=11)"]
+    assert "при n = 11 это ≈ 0.09 Recall@5" in by_type_section
 
 
 def test_leaderboard_lists_skipped_experiments_with_reason(
