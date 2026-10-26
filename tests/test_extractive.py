@@ -24,8 +24,13 @@ def make_context(docs: list[Document], doc_id: str, needle: str) -> ScoredChunk:
     for i, match in enumerate(_PARAGRAPH_RE.finditer(doc.text)):
         if needle in match.group():
             chunk = Chunk(
-                chunk_id=f"{doc_id}::{i:03d}", doc_id=doc_id, text=match.group(),
-                start=match.start(), end=match.end(), title=doc.title, metadata=dict(doc.metadata),
+                chunk_id=f"{doc_id}::{i:03d}",
+                doc_id=doc_id,
+                text=match.group(),
+                start=match.start(),
+                end=match.end(),
+                title=doc.title,
+                metadata=dict(doc.metadata),
             )
             return ScoredChunk(chunk=chunk, score=1.0, source="bm25")
     raise AssertionError(f"абзац с {needle!r} не найден в {doc_id}")
@@ -85,6 +90,27 @@ def test_every_sentence_has_a_citation(vacation_contexts: list[ScoredChunk]) -> 
 def test_respects_max_sentences(vacation_contexts: list[ScoredChunk]) -> None:
     text = ExtractiveGenerator(max_sentences=1).generate(VACATION_QUESTION, vacation_contexts).text
     assert text == f"{VACATION_SENTENCE} [1]"
+
+
+def test_weak_sentences_are_cut_relative_to_the_best_one() -> None:
+    # Лучшее предложение совпадает с вопросом по 4 стемам, остальные — по одному слову «отпуск».
+    # Раньше ответ всё равно добирал до max_sentences и тащил их из чужих документов.
+    contexts = [
+        make_chunk(VACATION_SENTENCE, "hr-vacation::000"),
+        make_chunk("Отпуск согласует руководитель подразделения.", "hr-sick::000"),
+        make_chunk("Перенос отпуска согласует руководитель подразделения.", "hr-sick::001"),
+    ]
+    result = ExtractiveGenerator(max_sentences=3).generate(VACATION_QUESTION, contexts)
+    assert result.text == f"{VACATION_SENTENCE} [1]"
+
+
+def test_sentences_close_to_the_best_one_are_kept() -> None:
+    contexts = [
+        make_chunk(VACATION_SENTENCE, "a::000"),
+        make_chunk("Ежегодный отпуск длится не меньше двух недель.", "b::000"),  # 3 стема из 4
+    ]
+    text = ExtractiveGenerator(max_sentences=3).generate(VACATION_QUESTION, contexts).text
+    assert text == f"{VACATION_SENTENCE} [1] Ежегодный отпуск длится не меньше двух недель. [2]"
 
 
 def test_min_overlap_filters_weak_sentences(vacation_contexts: list[ScoredChunk]) -> None:
@@ -157,7 +183,10 @@ def test_duplicate_sentences_from_overlapping_chunks_are_merged() -> None:
 
 
 def test_ties_are_broken_by_fragment_rank() -> None:
-    contexts = [make_chunk("Отпуск согласует руководитель.", "b::000"), make_chunk("Отпуск оформляют заранее.", "a::000")]
+    contexts = [
+        make_chunk("Отпуск согласует руководитель.", "b::000"),
+        make_chunk("Отпуск оформляют заранее.", "a::000"),
+    ]
     result = ExtractiveGenerator().generate("Что известно про отпуск?", contexts)
     assert result.text == "Отпуск согласует руководитель. [1] Отпуск оформляют заранее. [2]"
 
