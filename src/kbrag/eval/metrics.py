@@ -22,7 +22,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 
 from kbrag.eval.dataset import Span, is_relevant
-from kbrag.text import analyze
+from kbrag.text import STOPWORDS, stem, tokenize
 from kbrag.types import Chunk, Citation
 
 CoverageMatrix = list[list[bool]]
@@ -154,6 +154,18 @@ _CITATION_RE = re.compile(r"\[\d+(?:\s*,\s*\d+)*\]")
 _CYRILLIC_WORD_RE = re.compile(r"[а-я]+")
 # Хвост «гласные/й/ь (+х|м|ми)» — типичные падежные окончания.
 _SOFT_ENDING_RE = re.compile(r"[аеиоуыэюяйь]+(?:х|м|ми)?$")
+# Корни, у которых Snowball не может срезать окончание: основа слишком короткая
+# («днях» остаётся «днях»). Только для них soft_stem срезает хвост — см. его докстринг.
+_SHORT_ROOTS = frozenset({"дн"})
+
+# Нормализация чисел перед токенизацией (иначе «1 500» — это два терма «1» и «500»,
+# а «10:00» — «10» и «00», и ответ «500 рублей, 1 раз» засчитался бы за факт «1 500 рублей»).
+_DIGIT_GROUP_RE = re.compile(r"(?<=\d)[    ](?=\d{3}(?!\d))")  # «60 000» → «60000»
+_TIME_RE = re.compile(r"(?<![\d:])(\d{1,2}):(\d{2})(?![\d:])")  # «9:00» → «09h00»
+_PERCENT_RE = re.compile(r"(\d)\s*(?:%|процент[а-я]*)", re.IGNORECASE)  # «10 %» → «10pct»
+# Частицы, которые переворачивают смысл следующего слова. Они стоп-слова, и без особой
+# обработки «не оплачиваются» и «оплачиваются» дали бы один и тот же терм.
+_NEGATIONS = frozenset({"не", "ни", "без"})
 
 
 def strip_citations(text: str) -> str:
@@ -162,23 +174,62 @@ def strip_citations(text: str) -> str:
 
 
 def soft_stem(stem: str) -> str:
-    """Дополнительно обрезает падежное окончание у русской основы.
+    """Дополнительно обрезает падежное окончание у коротких русских основ.
 
     Стеммер Snowball не трогает окончание, если основа слишком короткая:
     «дней» → «дне», но «днях» → «днях». Для метрик это значит, что ответ
     «28 календарных днях» не засчитался бы за факт «28 календарных дней».
     Поэтому срезаем хвост из гласных (+ «х»/«м»/«ми»): обе формы дают «дн».
-    Числа и латиница не меняются — в них важен каждый символ («28» ≠ «280», VPN ≠ VPS).
+
+    Срезаем **только** когда остаётся известный короткий корень (``_SHORT_ROOTS``).
+    Общее правило «срезать гласный хвост у любой основы» склеивало разные слова:
+    «приём», «премии» и «прямо» → «пр», «режим» и «реже» → «реж» — и метрика засчитывала
+    факт «приём» ответу про премии. Числа и латиница не меняются («28» ≠ «280», VPN ≠ VPS).
     """
     if not _CYRILLIC_WORD_RE.fullmatch(stem):
         return stem
     shorter = _SOFT_ENDING_RE.sub("", stem)
-    return shorter if len(shorter) >= 2 else stem
+    return shorter if shorter in _SHORT_ROOTS else stem
+
+
+def _normalize_numbers(text: str) -> str:
+    """Склеивает разряды, время и проценты в один токен — до того, как их разрежет токенизатор."""
+    text = _DIGIT_GROUP_RE.sub("", text)
+    text = _TIME_RE.sub(lambda m: f" {int(m.group(1)):02d}h{m.group(2)} ", text)
+    return _PERCENT_RE.sub(r"\1pct ", text)
+
+
+def _term(token: str) -> str:
+    return soft_stem(stem(token))
 
 
 def match_terms(text: str, remove_stopwords: bool = True) -> list[str]:
-    """Термы для сравнения ответов: ``text.analyze`` + ``soft_stem``, без маркеров ссылок."""
-    return [soft_stem(term) for term in analyze(strip_citations(text), remove_stopwords)]
+    """Термы для сравнения ответов: стемы ``text`` + ``soft_stem``, без маркеров ссылок.
+
+    Отличия от ``text.analyze`` (он общий с BM25, поэтому его не трогаем):
+
+    * числа: «60 000» = «60000», «8:00» = «08:00» (время — один терм), «10%» ≠ «10»;
+    * отрицание склеивается со стемом следующего слова в один терм: «не более» → ``не_бол``.
+      Так ответ «оплачиваются» не получит балл за факт «не оплачиваются»,
+      и наоборот; «не более 2 дней» ≠ «не менее 2 дней». Порядок остальных слов не важен.
+
+    Ограничение: это сравнение лексическое. Синонимы («запрещены» вместо «не допускаются»),
+    переставленный диапазон («с 22:00 до 08:00» против «с 08:00 до 22:00») и смысловые
+    противоречия оно не видит — для LLM-ответов его стоит дополнять LLM-судьёй.
+    """
+    tokens = tokenize(_normalize_numbers(strip_citations(text)))
+    terms: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _NEGATIONS and i + 1 < len(tokens):
+            terms.append(f"{token}_{_term(tokens[i + 1])}")
+            i += 2
+            continue
+        if not (remove_stopwords and token in STOPWORDS):
+            terms.append(_term(token))
+        i += 1
+    return terms
 
 
 def token_f1(pred: str, gold: str) -> float:
@@ -205,6 +256,7 @@ def fact_recall(pred: str, key_facts: Sequence[str]) -> float | None:
     Строже token_f1 там, где это важно: ответ «14 календарных дней» на вопрос с фактом
     «28 календарных дней» получит 0, хотя слова почти совпадают.
     Факт только из стоп-слов («нет») сравнивается без удаления стоп-слов.
+    Как сравниваются отрицания, числа, время и проценты — см. ``match_terms``.
     Нет фактов → None (метрика неприменима, например для неотвечаемого вопроса).
     """
     pred_terms = set(match_terms(pred))
