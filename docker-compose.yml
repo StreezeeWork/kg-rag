@@ -11,6 +11,8 @@
 #       Нужны драйвер NVIDIA и NVIDIA Container Toolkit; первая загрузка модели (~15 ГБ) занимает время.
 #
 # Веб-интерфейс: http://localhost:8080   LLM API: http://localhost:8000/v1
+# Swagger UI (http://localhost:8080/docs) загружает скрипты с CDN — без интернета он не откроется;
+# сама страница, /ask, /health и /metrics работают офлайн.
 # Значения вида ${VAR:-по_умолчанию} можно задать в файле .env рядом с этим файлом (см. .env.example).
 # Нужен Docker Compose 2.20+ (`docker compose version`): ниже используется depends_on.required.
 # Порты открыты только на 127.0.0.1: у сервисов нет авторизации и лимита запросов.
@@ -37,6 +39,11 @@ services:
       # Ключ передаём только через окружение; пустой — если сервер LLM без авторизации.
       LLM_API_KEY: ${LLM_API_KEY:-}
       HF_HOME: /app/.cache/huggingface
+      # Допустимые значения заголовка Host через запятую. Пусто → localhost, 127.0.0.1, [::1], app.
+      # Открываете сервис по IP или имени в сети (192.168.1.10, kb.local) — добавьте его, иначе ответ 400.
+      KBRAG_ALLOWED_HOSTS: ${KBRAG_ALLOWED_HOSTS:-}
+      # Уровень логов kbrag в `docker logs`: DEBUG, INFO, WARNING.
+      KBRAG_LOG_LEVEL: ${KBRAG_LOG_LEVEL:-INFO}
     volumes:
       # Скачанные модели и кэш эмбеддингов переживают пересоздание контейнера.
       - app-cache:/app/.cache
