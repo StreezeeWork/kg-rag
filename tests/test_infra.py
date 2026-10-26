@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -22,6 +24,7 @@ from packaging.requirements import Requirement
 
 from kbrag.config import load_config
 from kbrag.pipeline import load_calibration
+from kbrag.types import Document, ScoredChunk
 
 ROOT = Path(__file__).resolve().parents[1]
 OFFLINE_CALIBRATION = "reports/calibration_offline.json"
@@ -224,6 +227,72 @@ def test_compose_hardening() -> None:
     assert "no-new-privileges:true" in services["app"]["security_opt"]
     assert "ipc" not in services["llm"]  # отдельный /dev/shm (shm_size) вместо общего IPC с хостом
     assert services["llm"]["shm_size"]
+
+
+# --- Переменные окружения: как их передаёт docker-compose и почему они не мешают тестам ----------
+
+
+@pytest.fixture(scope="module")
+def leaked_shell_env() -> Iterator[str]:
+    """Имитирует переменную, оставшуюся в shell разработчика: ставим её в обход monkeypatch.
+
+    Фикстура модульная, поэтому выполняется раньше autouse-фикстуры ``_isolate_kbrag_env``
+    из conftest.py — ровно как реальное окружение, существующее до запуска pytest.
+    """
+    name, previous = "KBRAG_LLM_MODEL", os.environ.get("KBRAG_LLM_MODEL")
+    os.environ[name] = "leaked-from-shell"
+    yield name
+    if previous is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = previous
+
+
+def test_shell_env_does_not_leak_into_tests(leaked_shell_env: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert leaked_shell_env not in os.environ
+    monkeypatch.chdir(ROOT)
+    assert load_config("configs/offline.yaml").generation.model != "leaked-from-shell"
+
+
+def test_env_beats_overrides_and_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Так docker-compose переключает сервис на LLM, не трогая YAML: KBRAG_GENERATION_BACKEND=openai.
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setenv("KBRAG_GENERATION_BACKEND", "openai")
+    monkeypatch.setenv("KBRAG_LLM_MODEL", "qwen-from-env")
+
+    cfg = load_config("configs/offline.yaml", overrides={"generation": {"model": "from-overrides"}})
+
+    assert cfg.generation.backend == "openai"  # в offline.yaml — extractive
+    assert cfg.generation.model == "qwen-from-env"
+
+
+def test_empty_env_value_keeps_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    # docker-compose передаёт `${KBRAG_GENERATION_BACKEND:-}` пустой строкой — это «не задано».
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setenv("KBRAG_GENERATION_BACKEND", "")
+    assert load_config("configs/offline.yaml").generation.backend == "extractive"
+
+
+# --- Общие фабрики фрагментов из conftest.py ------------------------------------------------------
+
+
+def test_make_context_returns_paragraph_of_mini_document(
+    make_context: Callable[..., ScoredChunk], mini_docs: list[Document]
+) -> None:
+    ctx = make_context("hr-vacation", "28 календарных", score=0.9, source="hybrid", details={"bm25": 3.2})
+
+    doc = next(d for d in mini_docs if d.doc_id == "hr-vacation")
+    assert ctx.chunk.chunk_id == "hr-vacation::002"  # абзацы: заголовок H1, H2, текст
+    assert doc.text[ctx.chunk.start : ctx.chunk.end] == ctx.chunk.text  # инвариант настоящих фрагментов
+    assert "28 календарных дней" in ctx.chunk.text
+    assert (ctx.score, ctx.source, ctx.details) == (0.9, "hybrid", {"bm25": 3.2})
+    with pytest.raises(AssertionError, match="не найден"):
+        make_context("it-vpn", "нет такого текста")
+
+
+def test_make_text_chunk_takes_doc_id_from_chunk_id(make_text_chunk: Callable[..., ScoredChunk]) -> None:
+    ctx = make_text_chunk("Срок — 5 дней.", "faq::007")
+    assert (ctx.chunk.doc_id, ctx.chunk.start, ctx.chunk.end) == ("faq", 0, len("Срок — 5 дней."))
 
 
 # --- scripts/check_part.py: авторские проверки эталона --------------------------------------------

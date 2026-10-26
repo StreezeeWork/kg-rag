@@ -3,16 +3,27 @@
 Мини-корпус позволяет тестировать каждый модуль за миллисекунды и без скачивания моделей.
 В нём есть всё, что делает задачу интересной: архивная и действующая версии одной политики
 (похожие тексты с разными цифрами), инструкция-«инъекция» внутри документа и вопрос без ответа.
+
+Здесь же — то, что нужно многим тестам сразу: фабрики фрагментов (``make_context``,
+``make_text_chunk``) и автоматическая очистка переменных окружения ``KBRAG_*``.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
 
-from kbrag.types import Document
+from kbrag.types import Chunk, Document, ScoredChunk
+
+# Эту переменную не трогаем: она включает нейросетевые тесты (см. tests/test_neural.py).
+_KEEP_ENV = frozenset({"KBRAG_RUN_NEURAL"})
+# Абзац markdown — подряд идущие непустые строки.
+_PARAGRAPH_RE = re.compile(r"[^\n]+(?:\n[^\n]+)*")
 
 MINI_DOCS_RAW: dict[str, tuple[dict[str, str], str]] = {
     "hr-vacation": (
@@ -176,3 +187,74 @@ def mini_gold_path(tmp_path: Path) -> Path:
         for item in MINI_GOLD:
             fh.write(json.dumps(item, ensure_ascii=False) + "\n")
     return path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_kbrag_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Убирает переменные ``KBRAG_*`` из окружения на время каждого теста (autouse — для всех тестов).
+
+    Зачем: переменные окружения перекрывают YAML-конфиг (``KBRAG_GENERATION_BACKEND``, ``KBRAG_LLM_*``,
+    ``KBRAG_CORPUS_DIR``) и выбирают конфиг сервиса (``KBRAG_CONFIG``). Если они остались в shell
+    разработчика (например, после ``set -a && . ./.env``), тесты проверяли бы не то, что в них написано.
+    Удаляем по префиксу, а не по списку: новая переменная не «просочится», если список забыли обновить.
+    Нужное значение тест ставит сам через ``monkeypatch.setenv`` — после теста оно уберётся.
+    """
+    for name in list(os.environ):
+        if name.upper().startswith("KBRAG_") and name.upper() not in _KEEP_ENV:
+            monkeypatch.delenv(name)
+
+
+@pytest.fixture()
+def make_context(mini_docs: list[Document]) -> Callable[..., ScoredChunk]:
+    """Фабрика фрагментов из мини-корпуса: ``make_context("hr-vacation", "28 календарных")``.
+
+    Фрагмент — абзац документа ``doc_id``, содержащий ``needle``. Настоящий чанкер не нужен: тестам
+    генерации, ссылок и guardrails важен текст, а не нарезка. ``chunk_id`` = ``<doc_id>::<номер абзаца>``
+    (как у чанкера), смещения ``start``/``end`` указывают на абзац в ``Document.text``.
+    ``score``, ``source``, ``details`` и ``section`` задаются, только если тесту они важны.
+    """
+    docs = {doc.doc_id: doc for doc in mini_docs}
+
+    def factory(
+        doc_id: str,
+        needle: str,
+        *,
+        score: float = 1.0,
+        source: str = "bm25",
+        details: Mapping[str, float] | None = None,
+        section: str = "",
+    ) -> ScoredChunk:
+        doc = docs[doc_id]
+        for i, match in enumerate(_PARAGRAPH_RE.finditer(doc.text)):
+            if needle in match.group():
+                chunk = Chunk(
+                    chunk_id=f"{doc_id}::{i:03d}",
+                    doc_id=doc_id,
+                    text=match.group(),
+                    start=match.start(),
+                    end=match.end(),
+                    title=doc.title,
+                    section=section,
+                    metadata=dict(doc.metadata),
+                )
+                return ScoredChunk(chunk=chunk, score=score, source=source, details=dict(details or {}))
+        raise AssertionError(f"абзац с {needle!r} не найден в {doc_id}")
+
+    return factory
+
+
+@pytest.fixture()
+def make_text_chunk() -> Callable[..., ScoredChunk]:
+    """Фабрика фрагмента из произвольного текста: ``make_text_chunk("Текст.", "doc::000")``.
+
+    Для тестов, где документ не нужен (инъекции, дубликаты, разбор предложений):
+    ``doc_id`` берётся из ``chunk_id`` до ``::``, смещения — 0..len(text).
+    """
+
+    def factory(
+        text: str, chunk_id: str = "doc::000", *, score: float = 1.0, source: str = "bm25"
+    ) -> ScoredChunk:
+        chunk = Chunk(chunk_id=chunk_id, doc_id=chunk_id.split("::")[0], text=text, start=0, end=len(text))
+        return ScoredChunk(chunk=chunk, score=score, source=source)
+
+    return factory
