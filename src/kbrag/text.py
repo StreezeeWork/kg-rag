@@ -61,6 +61,10 @@ STOPWORDS: frozenset[str] = frozenset(
 )
 
 _RU_STEMMER = snowballstemmer.stemmer("russian")
+# Слова, которые Snowball режет неправильно, а в корпусе они важны. «Орбита» — название системы
+# заявок: «в Орбите» стеммер принимает за глагол на «-ите» и даёт «орб», а «Орбита», «Орбиты»,
+# «Орбиту» — «орбит». Без исключения вопрос «заявка в Орбите» не находил бы «систему Орбита».
+_STEM_EXCEPTIONS: dict[str, str] = {"орбите": "орбит", "орбит": "орбит"}
 _EN_STEMMER = snowballstemmer.stemmer("english")
 # Объект snowballstemmer хранит состояние разбора (current, cursor) в себе, а /ask в API
 # выполняется в пуле потоков: два одновременных вызова портят друг другу слово (чужой стем
@@ -86,7 +90,12 @@ def tokenize(text: str) -> list[str]:
 
 @lru_cache(maxsize=200_000)
 def stem(token: str) -> str:
-    """Стемминг: русские слова — русским стеммером, латиница — английским, числа как есть."""
+    """Стемминг: русские слова — русским стеммером, латиница — английским, числа как есть.
+
+    Для немногих слов, которые стеммер режет неправильно, основа задана вручную (``_STEM_EXCEPTIONS``).
+    """
+    if token in _STEM_EXCEPTIONS:
+        return _STEM_EXCEPTIONS[token]
     if _CYRILLIC_RE.search(token):
         with _STEMMER_LOCK:
             return _RU_STEMMER.stemWord(token)

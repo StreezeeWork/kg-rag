@@ -94,6 +94,13 @@ def test_stem_merges_russian_word_forms(forms: tuple[str, ...]) -> None:
     assert len({stem(form) for form in forms}) == 1
 
 
+def test_stem_keeps_system_name_orbita_together() -> None:
+    # Snowball режет «Орбите» до «орб» (как глагол на «-ите»), остальные формы — до «орбит».
+    forms = ("орбита", "орбите", "орбиту", "орбиты", "орбитой", "орбит")
+    assert {stem(form) for form in forms} == {"орбит"}
+    assert analyze("Заявка в «Орбите»") == analyze("заявка в Орбита")
+
+
 def test_stem_uses_english_stemmer_for_latin() -> None:
     assert stem("connections") == stem("connection") == "connect"
 
