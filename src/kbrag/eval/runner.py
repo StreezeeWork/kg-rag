@@ -1,0 +1,434 @@
+"""Прогон экспериментов: пайплайн отвечает на эталонные вопросы, мы считаем метрики.
+
+Как устроен один эксперимент (``run_experiment``):
+
+1. Собираем пайплайн по конфигу — **один индекс на эксперимент**, все вопросы идут через него.
+2. Каждый вопрос прогоняем **без порога отказа** (``apply_threshold=False``) и запоминаем
+   уверенность поиска. Так одного прогона хватает и для подбора порога, и для метрик.
+3. Порог ``"auto"`` подбираем ``metrics.choose_threshold`` **только на dev**. Если бы в подборе
+   участвовал test, метрики test были бы завышены: порог «подогнан» под те же вопросы,
+   на которых его потом проверяют (утечка данных).
+4. Порог применяем постфактум ко всем вопросам: ответ считается отказом, если отказался
+   генератор ИЛИ уверенность ниже порога. Для метрик такой ответ заменяется на
+   ``ABSTAIN_TEXT``, ссылки обнуляются — ровно то, что вернул бы сервис.
+5. Считаем метрики по каждому вопросу и усредняем по сплитам ``dev`` / ``test`` / ``all``
+   и по типам вопросов (для сплита отчёта).
+
+Сетка экспериментов (``run_grid``) читается из YAML::
+
+    base: default.yaml            # базовый конфиг (см. правило поиска пути в load_experiments)
+    experiments:
+      - name: bm25
+        overrides: {retrieval: {mode: bm25}}
+      - name: hybrid-e5
+        requires_neural: true     # без sentence-transformers → пропуск с причиной
+        overrides: {retrieval: {mode: hybrid, dense: {embedder: sentence-transformers}}}
+      - name: hybrid-e5-rerank
+        requires_neural: true
+        heavy: true               # долгий: запускается только с include_heavy=True
+        overrides: {rerank: {enabled: true}}
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from kbrag.config import AppConfig, load_config
+from kbrag.eval.dataset import GoldItem, evidence_spans, load_gold, validate_gold
+from kbrag.eval.metrics import (
+    abstention_report,
+    choose_threshold,
+    citation_precision,
+    citation_recall,
+    fact_recall,
+    mean_ignore_none,
+    percentile,
+    retrieval_metrics,
+    token_f1,
+)
+from kbrag.eval.results import (
+    BY_TYPE_KEY,
+    GENERATION_METRICS,
+    ExperimentResult,
+    metric_names,
+    retrieval_metric_names,
+)
+from kbrag.generation import ABSTAIN_TEXT
+from kbrag.ingest import load_corpus
+from kbrag.pipeline import LOW_CONFIDENCE_FLAG, RAGPipeline
+from kbrag.retrieval import neural_available
+from kbrag.types import Answer, Citation, Document
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["ExperimentResult", "ExperimentSpec", "load_experiments", "run_experiment", "run_grid"]
+
+# Ключи эксперимента в experiments.yaml. Опечатка («requires_nueral») должна падать, а не
+# молча запускать нейросетевой эксперимент там, где его нет.
+_EXPERIMENT_KEYS = frozenset({"name", "overrides", "requires_neural", "heavy", "description"})
+_GRID_KEYS = frozenset({"base", "experiments", "description"})
+
+
+# ---------------------------------------------------------------------------
+# Один эксперимент
+# ---------------------------------------------------------------------------
+
+
+def run_experiment(
+    cfg: AppConfig,
+    name: str = "default",
+    gold: list[GoldItem] | None = None,
+    docs: list[Document] | None = None,
+) -> ExperimentResult:
+    """Прогоняет эталонный набор через пайплайн и возвращает метрики (см. описание модуля).
+
+    ``gold`` и ``docs`` можно передать готовыми (тесты, сетка экспериментов на одном корпусе);
+    иначе они читаются из ``cfg.gold_path`` и ``cfg.corpus_dir``.
+    """
+    docs = list(docs) if docs is not None else load_corpus(cfg.corpus_dir)
+    gold = list(gold) if gold is not None else load_gold(cfg.gold_path)
+    _check_gold(gold, docs)
+    k_values = list(cfg.eval.k_values)
+
+    # Пайплайну отдаём конфиг без порога: порог в оценке считаем сами (шаг 3), а иначе
+    # он попытался бы прочитать файл калибровки, оставшийся от прошлого запуска.
+    pipeline_cfg = cfg.model_copy(
+        update={"abstention": cfg.abstention.model_copy(update={"threshold": None})}
+    )
+    pipeline = RAGPipeline.from_config(pipeline_cfg, docs=docs)
+    logger.info("Эксперимент %r: %d вопросов, индекс %s", name, len(gold), pipeline.index_stats)
+
+    # Шаг 2: все вопросы без порога. Поиск достаём на max(k) фрагментов, чтобы честно
+    # посчитать Recall@10, а генератору отдаём только первые top_k — как в сервисе.
+    top_k = cfg.retrieval.top_k
+    retrieve_k = max([*k_values, top_k])
+    runs: list[_QuestionRun] = []
+    for item in gold:
+        retrieved, timings = pipeline.retrieve(item.question, top_k=retrieve_k)
+        answer = pipeline.answer_with_contexts(
+            item.question, retrieved[:top_k], timings=timings, apply_threshold=False
+        )
+        runs.append(
+            _QuestionRun(item=item, answer=answer, retrieved_ids=[s.chunk.chunk_id for s in retrieved])
+        )
+
+    # Шаг 3: порог.
+    threshold = _resolve_eval_threshold(cfg, runs)
+
+    # Шаги 4–5: применяем порог и считаем метрики.
+    docs_by_id = {doc.doc_id: doc for doc in docs}
+    per_question = [_score_question(run, threshold, pipeline, docs_by_id, k_values) for run in runs]
+    metrics = _split_metrics(per_question, k_values, cfg.eval.report_split)
+    logger.info(
+        "Эксперимент %r готов: порог %s, recall@5(test)=%s",
+        name,
+        threshold,
+        metrics["test"].get("recall@5"),
+    )
+    return ExperimentResult(
+        name=name,
+        config=cfg.model_dump(mode="json"),
+        metrics=metrics,
+        per_question=per_question,
+        threshold=threshold,
+        index_stats=dict(pipeline.index_stats),
+    )
+
+
+@dataclass
+class _QuestionRun:
+    """Сырой результат одного вопроса до применения порога."""
+
+    item: GoldItem
+    answer: Answer
+    retrieved_ids: list[str] = field(default_factory=list)
+
+
+def _check_gold(gold: Sequence[GoldItem], docs: Sequence[Document]) -> None:
+    # Битая разметка должна падать сразу, а не через полчаса прогона на середине набора.
+    errors = validate_gold(gold, docs)
+    if errors:
+        shown = "\n  ".join(errors[:10])
+        more = f"\n  … и ещё {len(errors) - 10}" if len(errors) > 10 else ""
+        raise ValueError(f"Ошибки в эталонном наборе ({len(errors)}):\n  {shown}{more}")
+
+
+def _resolve_eval_threshold(cfg: AppConfig, runs: Sequence[_QuestionRun]) -> float | None:
+    """Порог для оценки: число из конфига как есть, ``"auto"`` — подбор на dev, иначе None."""
+    abstention = cfg.abstention
+    if not abstention.enabled or abstention.threshold is None:
+        return None
+    if abstention.threshold != "auto":
+        return float(abstention.threshold)
+
+    dev = [run for run in runs if run.item.split == "dev"]
+    if not dev:
+        logger.warning("Порог 'auto': в наборе нет dev-вопросов, отказ по порогу выключен")
+        return None
+    # Только dev! Test-вопросы в подборе порога не участвуют (см. описание модуля).
+    threshold = choose_threshold(
+        [run.answer.confidence for run in dev],
+        [run.item.answerable for run in dev],
+    )
+    logger.info("Порог отказа подобран на %d dev-вопросах: %s", len(dev), threshold)
+    return threshold
+
+
+def _question_metric_names(k_values: Sequence[int]) -> list[str]:
+    """Метрики, которые имеют смысл для одного вопроса (остальные — только для сплита)."""
+    return [*retrieval_metric_names(k_values), *GENERATION_METRICS]
+
+
+def _score_question(
+    run: _QuestionRun,
+    threshold: float | None,
+    pipeline: RAGPipeline,
+    docs_by_id: dict[str, Document],
+    k_values: Sequence[int],
+) -> dict[str, Any]:
+    """Строка ``per_question``: что спросили, что ответили и метрики этого вопроса."""
+    item, answer = run.item, run.answer
+    below_threshold = threshold is not None and (answer.confidence is None or answer.confidence < threshold)
+    abstained = answer.abstained or below_threshold
+
+    # Так ответил бы сервис с этим порогом: фиксированная фраза отказа и никаких ссылок.
+    text = ABSTAIN_TEXT if abstained else answer.text
+    citations: list[Citation] = [] if abstained else list(answer.citations)
+    n_invalid = 0 if abstained else answer.invalid_citations
+    flags = list(answer.flags) + ([LOW_CONFIDENCE_FLAG] if below_threshold else [])
+    # При отказе по порогу сервис не вызывает генератор — не учитываем его время в латентности.
+    latency = answer.timings_ms.get("total_ms", 0.0)
+    if below_threshold:
+        latency -= answer.timings_ms.get("generate_ms", 0.0)
+
+    scores: dict[str, float | None] = dict.fromkeys(_question_metric_names(k_values))
+    if item.answerable:
+        spans = evidence_spans(item, docs_by_id)
+        retrieved_chunks = [pipeline.chunks_by_id[chunk_id] for chunk_id in run.retrieved_ids]
+        scores.update(retrieval_metrics(retrieved_chunks, spans, k_values))
+
+        # Отказ на отвечаемый вопрос = 0 (а не «пропуск»): иначе система, отказывающаяся
+        # на все трудные вопросы, выглядела бы точнее честно отвечающей.
+        facts = fact_recall(text, item.key_facts)
+        scores["fact_recall"] = 0.0 if abstained and facts is not None else facts
+        scores["fact_recall_answered"] = None if abstained else facts
+        scores["token_f1"] = 0.0 if abstained else token_f1(text, item.answer)
+        scores["citation_precision"] = citation_precision(citations, pipeline.chunks_by_id, spans)
+        scores["citation_recall"] = citation_recall(citations, pipeline.chunks_by_id, spans)
+    n_markers = len(citations) + n_invalid
+    scores["invalid_citation_rate"] = n_invalid / n_markers if n_markers else None
+
+    return {
+        "qid": item.qid,
+        "type": item.qtype,
+        "split": item.split,
+        "question": item.question,
+        "gold_answer": item.answer,
+        "answer": text,
+        "abstained": abstained,
+        "confidence": answer.confidence,
+        "retrieved": list(run.retrieved_ids),
+        "flags": flags,
+        "latency_ms": round(latency, 3),
+        **scores,
+    }
+
+
+def aggregate_metrics(rows: Sequence[dict[str, Any]], k_values: Sequence[int]) -> dict[str, float | None]:
+    """Метрики группы вопросов (сплита или типа) в каноническом порядке ``metric_names``.
+
+    Метрики вопросов усредняются без None: «неприменимо» (например, recall у
+    неотвечаемого вопроса) не тянет среднее вниз. Поэтому retrieval-метрики сами
+    собой считаются только по answerable, а ``fact_recall_answered`` — только по отвеченным.
+    """
+    question_names = set(_question_metric_names(k_values))
+    abstention = abstention_report(
+        [bool(row["abstained"]) for row in rows],
+        [row["type"] != "unanswerable" for row in rows],
+    )
+    latencies = [row["latency_ms"] for row in rows]
+    result: dict[str, float | None] = {}
+    for name in metric_names(k_values):
+        if name in question_names:
+            result[name] = mean_ignore_none([row.get(name) for row in rows])
+        elif name in abstention:
+            result[name] = abstention[name]
+        elif name == "latency_p50_ms":
+            result[name] = percentile(latencies, 50)
+        elif name == "latency_p95_ms":
+            result[name] = percentile(latencies, 95)
+        elif name == "n_questions":
+            result[name] = len(rows)
+    return result
+
+
+def _split_metrics(
+    rows: Sequence[dict[str, Any]], k_values: Sequence[int], report_split: str
+) -> dict[str, dict]:
+    """``{"dev": {...}, "test": {...}, "all": {...}, "by_type": {qtype: {...}}}``."""
+    metrics: dict[str, dict] = {
+        "dev": aggregate_metrics([row for row in rows if row["split"] == "dev"], k_values),
+        "test": aggregate_metrics([row for row in rows if row["split"] == "test"], k_values),
+        "all": aggregate_metrics(rows, k_values),
+    }
+    report_rows = rows if report_split == "all" else [row for row in rows if row["split"] == report_split]
+    by_type: dict[str, dict] = {}
+    for qtype in sorted({row["type"] for row in report_rows}):
+        by_type[qtype] = aggregate_metrics([row for row in report_rows if row["type"] == qtype], k_values)
+    metrics[BY_TYPE_KEY] = by_type
+    return metrics
+
+
+# ---------------------------------------------------------------------------
+# Сетка экспериментов
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExperimentSpec:
+    """Одна строка из ``experiments.yaml``."""
+
+    name: str
+    overrides: dict[str, Any] = field(default_factory=dict)
+    requires_neural: bool = False
+    heavy: bool = False
+    description: str = ""
+
+
+def load_experiments(experiments_path: str | Path) -> tuple[Path | None, list[ExperimentSpec]]:
+    """Читает ``experiments.yaml``: возвращает путь к базовому конфигу и список экспериментов.
+
+    Правило для ``base`` (относительный путь): сначала ищем **рядом с файлом экспериментов**
+    (``configs/experiments.yaml`` + ``base: default.yaml`` → ``configs/default.yaml``), а если
+    там файла нет — относительно текущего каталога, то есть корня проекта, откуда запускают
+    ``kbrag`` (``base: configs/default.yaml``). Так работают обе привычные записи.
+    Нет ``base`` → значения по умолчанию из ``AppConfig``.
+    """
+    path = Path(experiments_path)
+    with path.open(encoding="utf-8-sig") as fh:
+        data = yaml.safe_load(fh) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: ожидается YAML-словарь с ключами base и experiments")
+    _reject_unknown_keys(data, _GRID_KEYS, where=str(path))
+
+    raw_experiments = data.get("experiments")
+    if not isinstance(raw_experiments, list) or not raw_experiments:
+        raise ValueError(f"{path}: 'experiments' должен быть непустым списком")
+
+    specs: list[ExperimentSpec] = []
+    seen: set[str] = set()
+    for position, raw in enumerate(raw_experiments, start=1):
+        where = f"{path}: эксперимент №{position}"
+        if not isinstance(raw, dict) or not str(raw.get("name") or "").strip():
+            raise ValueError(f"{where}: нужен словарь с непустым полем name")
+        _reject_unknown_keys(raw, _EXPERIMENT_KEYS, where=where)
+        name = str(raw["name"]).strip()
+        if name in seen:
+            raise ValueError(f"{path}: имя эксперимента {name!r} повторяется")
+        seen.add(name)
+        overrides = raw.get("overrides") or {}
+        if not isinstance(overrides, dict):
+            raise ValueError(f"{where} ({name}): overrides должен быть словарём")
+        specs.append(
+            ExperimentSpec(
+                name=name,
+                overrides=overrides,
+                requires_neural=bool(raw.get("requires_neural", False)),
+                heavy=bool(raw.get("heavy", False)),
+                description=str(raw.get("description") or ""),
+            )
+        )
+    return _resolve_base(path, data.get("base")), specs
+
+
+def run_grid(
+    experiments_path: str | Path,
+    only: list[str] | None = None,
+    include_heavy: bool = False,
+) -> list[ExperimentResult]:
+    """Прогоняет эксперименты из ``experiments.yaml`` по порядку.
+
+    Конфиг эксперимента = базовый YAML + ``overrides`` (рекурсивное слияние
+    ``config.deep_merge``) + переменные окружения. Эксперименты, которые нельзя или
+    не просили запускать, не выбрасываются, а возвращаются со ``skipped``-причиной —
+    в отчёте видно, что они пропущены осознанно.
+
+    ``only`` — запустить только эксперименты с этими именами (неизвестное имя → ``ValueError``).
+    """
+    base_path, specs = load_experiments(experiments_path)
+    if only is not None:
+        unknown = sorted(set(only) - {spec.name for spec in specs})
+        if unknown:
+            raise ValueError(f"Неизвестные эксперименты: {unknown}; есть: {[s.name for s in specs]}")
+        wanted = set(only)
+        specs = [spec for spec in specs if spec.name in wanted]
+
+    # Корпус и эталон читаем один раз на сетку: эксперименты обычно отличаются только поиском.
+    docs_cache: dict[str, list[Document]] = {}
+    gold_cache: dict[str, list[GoldItem]] = {}
+    results: list[ExperimentResult] = []
+    for spec in specs:
+        # Конфиг проверяем и у пропускаемых экспериментов: опечатка в overrides видна сразу.
+        cfg = load_config(base_path, overrides=spec.overrides)
+        reason = _skip_reason(spec, cfg, include_heavy)
+        if reason is not None:
+            logger.info("Эксперимент %r пропущен: %s", spec.name, reason)
+            results.append(
+                ExperimentResult.for_skipped(spec.name, reason, config=cfg.model_dump(mode="json"))
+            )
+            continue
+
+        if cfg.corpus_dir not in docs_cache:
+            docs_cache[cfg.corpus_dir] = load_corpus(cfg.corpus_dir)
+        if cfg.gold_path not in gold_cache:
+            gold_cache[cfg.gold_path] = load_gold(cfg.gold_path)
+        logger.info("Запуск эксперимента %r", spec.name)
+        results.append(
+            run_experiment(
+                cfg, name=spec.name, gold=gold_cache[cfg.gold_path], docs=docs_cache[cfg.corpus_dir]
+            )
+        )
+    return results
+
+
+def config_needs_neural(cfg: AppConfig) -> bool:
+    """Нужны ли конфигу sentence-transformers (на случай, если requires_neural забыли указать)."""
+    uses_st_embedder = cfg.retrieval.mode in ("dense", "hybrid") and cfg.retrieval.dense.embedder == (
+        "sentence-transformers"
+    )
+    return cfg.rerank.enabled or uses_st_embedder
+
+
+def _skip_reason(spec: ExperimentSpec, cfg: AppConfig, include_heavy: bool) -> str | None:
+    if (spec.requires_neural or config_needs_neural(cfg)) and not neural_available():
+        return "нужны нейросетевые зависимости (sentence-transformers): pip install -e .[neural]"
+    if spec.heavy and not include_heavy:
+        return "тяжёлый эксперимент (heavy): запускается только с include_heavy=True"
+    return None
+
+
+def _resolve_base(experiments_path: Path, base: Any) -> Path | None:
+    if base is None:
+        return None
+    candidate = Path(str(base))
+    if candidate.is_absolute():
+        options = [candidate]
+    else:
+        options = [experiments_path.parent / candidate, Path.cwd() / candidate]
+    for option in options:
+        if option.is_file():
+            return option
+    tried = ", ".join(str(option) for option in options)
+    raise FileNotFoundError(f"{experiments_path}: базовый конфиг {base!r} не найден (искали: {tried})")
+
+
+def _reject_unknown_keys(data: dict, allowed: frozenset[str], where: str) -> None:
+    unknown = sorted(str(key) for key in data if key not in allowed)
+    if unknown:
+        raise ValueError(f"{where}: неизвестные ключи {unknown}; допустимы {sorted(allowed)}")
