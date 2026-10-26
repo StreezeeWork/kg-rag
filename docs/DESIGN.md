@@ -12,8 +12,9 @@
 data/corpus/**/*.md ──loader──► Document ──chunker──► Chunk ──retriever.index()
                                                               │
 вопрос ──► retriever.search(candidates_k) ──► [reranker] ──► top_k ScoredChunk
-       ──► confidence ≥ threshold? ──нет──► отказ («В базе знаний нет ответа…»)
-                                   └─да──► guardrails.sanitize ──► generator ──► Answer(+citations)
+       ──► confidence + guardrails (check_question, sanitize_contexts: флаги и очищенные копии)
+       ──► confidence ≥ threshold? ──нет──► отказ («В базе знаний нет ответа…»), фрагменты с флагами
+                                   └─да──► лимит контекста ──► generator(копии) ──► Answer(+citations)
 data/eval/gold.jsonl ──► eval.runner (dev: калибровка порога, test: отчёт) ──► reports/
 ```
 
@@ -126,8 +127,9 @@ class RAGPipeline:
         # источник: abstention.score_source; "auto" → "rerank" если reranker, иначе "dense" если режим dense/hybrid, иначе "bm25";
         # значение = max(details[source]) по контекстам, None если ни у одного нет
     def answer(self, question: str, top_k: int | None = None, apply_threshold: bool = True) -> Answer
+        # guardrails (флаги и очищенные копии) — до решения об отказе;
         # отказ без вызова генератора, если abstention.enabled и apply_threshold и threshold задан и confidence < threshold
-        # (flags += ["low_confidence"]); иначе guardrails → generator → parse_citations.
+        # (flags += ["low_confidence"]); иначе generator(очищенные копии) → parse_citations.
         # Answer.contexts — ИСХОДНЫЕ (не очищенные) контексты; timings_ms: retrieve_ms, rerank_ms, generate_ms, total_ms
 
 def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "chunking", "retrieval", "rerank")
