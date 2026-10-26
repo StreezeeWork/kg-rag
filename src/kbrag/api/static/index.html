@@ -1,0 +1,915 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>kb-rag — ассистент по базе знаний</title>
+<!--
+  Одностраничный интерфейс к API kb-rag. Без сборки, фреймворков и внешних ресурсов:
+  всё (стили, скрипт, иконки) встроено в этот файл, поэтому страница работает офлайн
+  и в закрытом контуре, а FastAPI отдаёт её одним файлом на GET /.
+
+  Правило безопасности: любой текст из ответа API (ответ модели, фрагменты документов,
+  заголовки) попадает на страницу ТОЛЬКО через textContent / text-узлы — никогда через innerHTML.
+  Документы базы знаний — внешние данные: в них может оказаться <script> или вредная ссылка.
+-->
+<style>
+  /* ---------- Цвета и шрифты: одна точка правды для светлой и тёмной темы ---------- */
+  :root {
+    --bg: #f6f6f3;
+    --surface: #ffffff;
+    --surface-2: #f0f0ec;
+    --text: #1c1d20;
+    --muted: #5e6268;
+    --border: #e1e1da;
+    --accent: #2f5bd3;
+    --accent-ink: #ffffff;
+    --accent-soft: #e7edfc;
+    --ok: #1d7444;
+    --ok-soft: #e2f3e8;
+    --abstain: #44506a;
+    --abstain-soft: #e8ecf3;
+    --warn: #8a5200;
+    --warn-soft: #fff0d4;
+    --danger: #b3261e;
+    --danger-soft: #fde8e6;
+    --seg-1: #2f5bd3;
+    --seg-2: #8b5cf6;
+    --seg-3: #0f9784;
+    --seg-4: #9aa0a6;
+    --shadow: 0 1px 2px rgba(20, 20, 30, 0.04), 0 4px 16px rgba(20, 20, 30, 0.05);
+    --radius: 14px;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111215;
+      --surface: #1a1b1f;
+      --surface-2: #23252a;
+      --text: #e9e9e6;
+      --muted: #a2a5ab;
+      --border: #30323a;
+      --accent: #84a9ff;
+      --accent-ink: #0c1430;
+      --accent-soft: #1e2947;
+      --ok: #74d39e;
+      --ok-soft: #16301f;
+      --abstain: #c9d3e3;
+      --abstain-soft: #262f40;
+      --warn: #f3b74a;
+      --warn-soft: #382a10;
+      --danger: #ff8f86;
+      --danger-soft: #3a1614;
+      --seg-1: #84a9ff;
+      --seg-2: #b79dff;
+      --seg-3: #4fd0bc;
+      --seg-4: #6b7078;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 20px rgba(0, 0, 0, 0.25);
+    }
+  }
+
+  /* ---------- База ---------- */
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.55 var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 28px 16px 56px; }
+  h1, h2, h3 { margin: 0; line-height: 1.25; letter-spacing: -0.01em; }
+  code { font-family: var(--font-mono); font-size: 0.85em; }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  /* ---------- Шапка ---------- */
+  .top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin-bottom: 20px;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .logo {
+    flex: none; width: 40px; height: 40px; border-radius: 11px;
+    display: grid; place-items: center;
+    background: var(--accent); color: var(--accent-ink);
+  }
+  .brand h1 { font-size: 1.2rem; }
+  .brand p { margin: 2px 0 0; color: var(--muted); font-size: 0.9rem; }
+  .health {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 4px 11px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--surface); color: var(--muted); font-size: 0.82rem;
+  }
+  .health::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--seg-4);
+  }
+  .health[data-state="ok"]::before { background: var(--ok); }
+  .health[data-state="down"]::before { background: var(--danger); }
+
+  /* ---------- Карточки ---------- */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px;
+  }
+  #intro, #result { margin-top: 16px; }
+
+  /* ---------- Форма вопроса ---------- */
+  .q-label { display: block; font-weight: 600; margin-bottom: 8px; }
+  textarea {
+    display: block; width: 100%; min-height: 88px; max-height: 300px; resize: none;
+    padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--surface-2); color: var(--text);
+    font: inherit; font-size: 1.05rem; line-height: 1.5;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  textarea::placeholder { color: var(--muted); opacity: 0.85; }
+  textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .form-row { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; margin-top: 12px; }
+  .form-row .spacer { flex: 1; }
+  .topk { display: inline-flex; align-items: center; gap: 8px; font-size: 0.9rem; color: var(--muted); }
+  .topk input {
+    width: 4.2em; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface-2); color: var(--text); font: inherit; text-align: center;
+  }
+  .hint, .counter { font-size: 0.8rem; color: var(--muted); }
+  .counter.near-limit { color: var(--warn); }
+  kbd {
+    font-family: var(--font-mono); font-size: 0.85em; padding: 1px 5px;
+    border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; background: var(--surface-2);
+  }
+  .primary {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-width: 128px; padding: 10px 18px; border: 0; border-radius: 10px;
+    background: var(--accent); color: var(--accent-ink); font-weight: 600; cursor: pointer;
+    transition: filter 0.15s, opacity 0.15s;
+  }
+  .primary:hover { filter: brightness(1.08); }
+  .primary:disabled { opacity: 0.65; cursor: progress; }
+  .spinner {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid currentColor; border-right-color: transparent;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .examples { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
+  .examples-label { font-size: 0.8rem; color: var(--muted); margin-right: 2px; }
+  .chip {
+    padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px;
+    background: transparent; font-size: 0.84rem; text-align: left; cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ---------- Статус и ошибки ---------- */
+  .status { min-height: 0; margin-top: 12px; font-size: 0.9rem; color: var(--muted); }
+  .status:empty { display: none; }
+  .alert {
+    margin-top: 16px; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid var(--danger); background: var(--danger-soft); color: var(--danger);
+  }
+
+  /* ---------- Пояснение до первого вопроса ---------- */
+  .intro h2 { font-size: 1rem; margin-bottom: 10px; }
+  .steps { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+  .steps li { display: grid; grid-template-columns: 28px 1fr; gap: 10px; color: var(--muted); font-size: 0.93rem; }
+  .steps b { color: var(--text); font-weight: 600; }
+  .step-num {
+    width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center;
+    background: var(--surface-2); color: var(--muted); font: 600 0.8rem/1 var(--font-mono);
+  }
+
+  /* ---------- Ответ ---------- */
+  .result { transition: opacity 0.2s; }
+  .result.stale { opacity: 0.5; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    background: var(--surface-2); color: var(--muted);
+    font-size: 0.8rem; font-weight: 600; line-height: 1.3;
+  }
+  .badge svg { flex: none; }
+  .badge.ok { background: var(--ok-soft); color: var(--ok); }
+  .badge.abstain { background: var(--abstain-soft); color: var(--abstain); }
+  .badge.warn { background: var(--warn-soft); color: var(--warn); }
+  .badge.neutral { font-weight: 500; }
+  .badge .num { font-family: var(--font-mono); }
+
+  .answer {
+    font-size: 1.08rem; line-height: 1.7;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .answer.abstained { color: var(--muted); }
+  .answer-note { margin: 10px 0 0; font-size: 0.88rem; color: var(--muted); }
+  .cite {
+    display: inline-block; margin: 0 1px; padding: 2px 5px; border: 0; border-radius: 5px;
+    background: var(--accent-soft); color: var(--accent);
+    font: 600 0.74em/1.2 var(--font-mono); vertical-align: 0.15em; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .cite:hover, .cite:focus-visible { background: var(--accent); color: var(--accent-ink); }
+  .cite.invalid { background: var(--danger-soft); color: var(--danger); cursor: help; }
+
+  /* ---------- Тайминги ---------- */
+  .timings { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .timings h3 { font-size: 0.8rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+  .bar { display: flex; gap: 2px; height: 8px; border-radius: 999px; overflow: hidden; background: var(--surface-2); }
+  .bar span { display: block; height: 100%; min-width: 3px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-size: 0.84rem; color: var(--muted); }
+  .legend .item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .dot { width: 9px; height: 9px; border-radius: 3px; }
+  .legend .value { color: var(--text); font-family: var(--font-mono); font-size: 0.92em; }
+  .seg-1 { background: var(--seg-1); }
+  .seg-2 { background: var(--seg-2); }
+  .seg-3 { background: var(--seg-3); }
+  .seg-4 { background: var(--seg-4); }
+
+  /* ---------- Фрагменты-источники ---------- */
+  .sources-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 26px 0 12px; }
+  .sources-head h2 { font-size: 1.02rem; }
+  .sources-head span { font-size: 0.84rem; color: var(--muted); white-space: nowrap; }
+  .contexts { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .ctx details {
+    border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+    overflow: hidden; scroll-margin: 24px;
+  }
+  .ctx.flash details { animation: flash 1.8s ease-out; }
+  @keyframes flash {
+    0%, 30% { box-shadow: 0 0 0 3px var(--accent); border-color: var(--accent); }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  .ctx summary {
+    display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: start;
+    padding: 12px 14px; cursor: pointer; list-style: none;
+  }
+  .ctx summary::-webkit-details-marker { display: none; }
+  .ctx summary:hover { background: var(--surface-2); }
+  .ctx-index {
+    width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    background: var(--surface-2); color: var(--muted); font: 600 0.82rem/1 var(--font-mono);
+  }
+  .ctx.cited .ctx-index { background: var(--accent-soft); color: var(--accent); }
+  .ctx-head { min-width: 0; }
+  .ctx-title { display: block; font-weight: 600; overflow-wrap: anywhere; }
+  .ctx-section { display: block; margin-top: 2px; font-size: 0.85rem; color: var(--muted); overflow-wrap: anywhere; }
+  .ctx-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+  .score { font: 0.8rem/1.2 var(--font-mono); color: var(--muted); white-space: nowrap; }
+  .chevron { color: var(--muted); transition: transform 0.2s; }
+  details[open] .chevron { transform: rotate(180deg); }
+  .tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+  .tag {
+    padding: 2px 7px; border-radius: 6px; font-size: 0.72rem; font-weight: 600;
+    background: var(--surface-2); color: var(--muted); white-space: nowrap;
+  }
+  .tag.cited { background: var(--accent-soft); color: var(--accent); }
+  .tag.warn { background: var(--warn-soft); color: var(--warn); }
+  .ctx-body { padding: 0 14px 14px 56px; }
+  .ctx-ids { margin: 0 0 8px; font-size: 0.78rem; color: var(--muted); overflow-wrap: anywhere; }
+  .ctx-warning {
+    margin: 0 0 10px; padding: 8px 10px; border-radius: 8px;
+    background: var(--warn-soft); color: var(--warn); font-size: 0.84rem;
+  }
+  .ctx-text {
+    margin: 0; padding-left: 12px; border-left: 3px solid var(--border);
+    font-size: 0.95rem; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .empty { color: var(--muted); font-size: 0.92rem; }
+
+  footer { margin-top: 36px; font-size: 0.8rem; color: var(--muted); text-align: center; }
+  footer a { color: inherit; }
+
+  /* ---------- Телефоны ---------- */
+  @media (max-width: 560px) {
+    .wrap { padding-top: 18px; }
+    .card { padding: 14px; }
+    .hint { display: none; }
+    .form-row .spacer { display: none; }
+    .primary { width: 100%; }
+    .ctx summary { grid-template-columns: auto 1fr; }
+    .ctx-meta { grid-column: 2; flex-direction: row; align-items: center; justify-content: flex-start; flex-wrap: wrap; }
+    .tags { justify-content: flex-start; }
+    .chevron { display: none; }
+    .ctx-body { padding-left: 14px; }
+  }
+
+  /* Пользователь попросил систему не анимировать интерфейс — уважаем это. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5V5a2 2 0 0 1 2-2h13v15H6.5A2.5 2.5 0 0 0 4 20.5 2.5 2.5 0 0 0 6.5 23H19"/>
+          <circle cx="11.5" cy="9.5" r="3"/><path d="m13.7 11.7 2.3 2.3"/>
+        </svg>
+      </span>
+      <div>
+        <h1>kb-rag</h1>
+        <p>Ассистент по базе знаний «Нимбус Технологии»</p>
+      </div>
+    </div>
+    <span class="health" id="health" data-state="unknown">проверяем сервис…</span>
+  </header>
+
+  <main>
+    <form class="card" id="ask-form" novalidate>
+      <label class="q-label" for="question">Ваш вопрос</label>
+      <textarea id="question" name="question" maxlength="1000" rows="3" required
+                placeholder="Например: сколько дней ежегодного отпуска положено сотруднику?"></textarea>
+      <div class="form-row">
+        <label class="topk" title="Сколько фрагментов базы знаний передать генератору ответа">
+          Фрагментов
+          <input type="number" id="top-k" name="top_k" min="1" max="20" step="1" value="5" inputmode="numeric">
+        </label>
+        <span class="counter" id="counter" aria-live="off">0 / 1000</span>
+        <span class="spacer"></span>
+        <span class="hint"><kbd>Enter</kbd> — спросить, <kbd>Shift</kbd>+<kbd>Enter</kbd> — новая строка</span>
+        <button class="primary" type="submit" id="submit">
+          <span id="submit-label">Спросить</span>
+        </button>
+      </div>
+      <div class="examples" id="examples">
+        <span class="examples-label">Попробуйте:</span>
+        <button type="button" class="chip" data-question="Сколько одновременных VPN-подключений допускается для одной учётной записи?">VPN-подключения</button>
+        <button type="button" class="chip" data-question="Какой годовой лимит компенсации спорта на одного сотрудника?">Компенсация спорта</button>
+        <button type="button" class="chip" data-question="С какого по какое время длится ядро рабочего дня?">Ядро рабочего дня</button>
+        <button type="button" class="chip" data-question="Можно ли приводить собаку в офис?">Вопрос вне базы</button>
+      </div>
+    </form>
+
+    <!-- Короткие сообщения для экранных дикторов и индикатор загрузки. -->
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+    <div class="alert" id="error" role="alert" hidden></div>
+
+    <section class="card intro" id="intro" aria-labelledby="intro-title">
+      <h2 id="intro-title">Как получается ответ</h2>
+      <ol class="steps">
+        <li><span class="step-num">1</span><span><b>Поиск.</b> Вопрос ищется по фрагментам документов сразу двумя способами — по словам (BM25) и по смыслу (эмбеддинги).</span></li>
+        <li><span class="step-num">2</span><span><b>Проверка уверенности.</b> Если подходящих фрагментов нет, ассистент честно говорит «нет ответа», а не придумывает.</span></li>
+        <li><span class="step-num">3</span><span><b>Ответ со ссылками.</b> Каждое утверждение помечено <span class="cite">[n]</span> — нажмите, чтобы увидеть фрагмент-источник.</span></li>
+      </ol>
+    </section>
+
+    <section class="result" id="result" hidden aria-labelledby="answer-title">
+      <div class="card">
+        <h2 class="sr-only" id="answer-title">Ответ</h2>
+        <div class="badges" id="badges"></div>
+        <div class="answer" id="answer"></div>
+        <p class="answer-note" id="answer-note" hidden></p>
+        <div class="timings" id="timings" hidden>
+          <h3>Время по этапам</h3>
+          <div class="bar" id="timing-bar" aria-hidden="true"></div>
+          <div class="legend" id="timing-legend"></div>
+        </div>
+      </div>
+
+      <div class="sources-head">
+        <h2 id="sources-title">Источники</h2>
+        <span id="sources-count"></span>
+      </div>
+      <ol class="contexts" id="contexts" aria-labelledby="sources-title"></ol>
+    </section>
+  </main>
+
+  <footer>
+    Ответы строятся только по документам базы знаний. Служебное: <a href="health">/health</a> · <a href="metrics">/metrics</a>
+  </footer>
+</div>
+
+<noscript>
+  <p style="text-align:center">Для работы страницы нужен JavaScript. API доступен напрямую: POST /ask.</p>
+</noscript>
+
+<script>
+(() => {
+  "use strict";
+
+  // Пути относительные (без ведущего «/»): страница открыта на «/», поэтому «ask» = POST /ask,
+  // а если сервис спрятан за прокси под префиксом (например, /kb/), запросы пойдут в /kb/ask.
+  const ASK_URL = "ask";
+  const HEALTH_URL = "health";
+  const MAX_TOP_K = 20;
+  const MAX_QUESTION_CHARS = 1000;
+
+  // Подписи этапов. Ключи совпадают с Answer.timings_ms из пайплайна; неизвестные ключи покажем как есть.
+  const STAGES = [
+    { key: "retrieve_ms", label: "Поиск", seg: "seg-1" },
+    { key: "rerank_ms", label: "Реранкинг", seg: "seg-2" },
+    { key: "generate_ms", label: "Генерация", seg: "seg-3" },
+  ];
+  const INJECTION_PREFIX = "prompt_injection";
+
+  const $ = (id) => document.getElementById(id);
+  const form = $("ask-form");
+  const questionEl = $("question");
+  const topKEl = $("top-k");
+  const submitBtn = $("submit");
+  const submitLabel = $("submit-label");
+  const counterEl = $("counter");
+  const statusEl = $("status");
+  const errorEl = $("error");
+  const introEl = $("intro");
+  const resultEl = $("result");
+  const badgesEl = $("badges");
+  const answerEl = $("answer");
+  const answerNoteEl = $("answer-note");
+  const timingsEl = $("timings");
+  const timingBarEl = $("timing-bar");
+  const timingLegendEl = $("timing-legend");
+  const sourcesTitleEl = $("sources-title");
+  const sourcesCountEl = $("sources-count");
+  const contextsEl = $("contexts");
+
+  let inFlight = null; // AbortController текущего запроса: новый вопрос отменяет старый
+
+  // ---------------------------------------------------------------------------
+  // Безопасное создание элементов. Текст ВСЕГДА уходит в text-узлы, поэтому HTML
+  // из ответа или документа отображается как текст и не исполняется (защита от XSS).
+  // Имена атрибутов задаёт только наш код, данные из API в href/on* не попадают.
+  // ---------------------------------------------------------------------------
+  function el(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    for (const [name, value] of Object.entries(attrs || {})) {
+      if (value === null || value === undefined || value === false) continue;
+      if (name === "className") node.className = value;
+      else if (name === "text") node.textContent = String(value);
+      else node.setAttribute(name, value === true ? "" : String(value));
+    }
+    for (const child of children) {
+      if (child === null || child === undefined || child === false) continue;
+      node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    }
+    return node;
+  }
+
+  // Иконки — статичная разметка из нашего кода (не из данных), поэтому их можно собрать через DOMParser.
+  const ICONS = {
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/>',
+    alert: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
+    gauge: '<path d="M12 14l3-3"/><path d="M3.3 17a9 9 0 1 1 17.4 0"/>',
+    chevron: '<path d="m6 9 6 6 6-6"/>',
+  };
+  function icon(name, size = 14) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", size);
+    svg.setAttribute("height", size);
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    const parsed = new DOMParser().parseFromString(
+      `<svg xmlns="http://www.w3.org/2000/svg">${ICONS[name]}</svg>`, "image/svg+xml");
+    svg.append(...parsed.documentElement.childNodes);
+    return svg;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Форматирование
+  // ---------------------------------------------------------------------------
+  // Русские формы слова: 1 фрагмент, 2 фрагмента, 5 фрагментов.
+  function plural(n, one, few, many) {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return one;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+    return many;
+  }
+
+  function formatMs(ms) {
+    if (!Number.isFinite(ms)) return "—";
+    if (ms === 0) return "0 мс"; // этап пропущен (например, реранкер выключен)
+    if (ms < 1) return "<1 мс";
+    if (ms < 1000) return `${Math.round(ms)} мс`;
+    return `${(ms / 1000).toFixed(2)} с`;
+  }
+
+  // Score разных этапов живут в разных шкалах (RRF ≈ 0.03, косинус ≤ 1, логиты реранкера бывают < 0),
+  // поэтому точность подбираем под величину, а не режем всё до двух знаков.
+  function formatScore(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+    const abs = Math.abs(value);
+    if (abs >= 100) return value.toFixed(0);
+    if (abs >= 1) return value.toFixed(2);
+    return value.toFixed(3);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Состояние страницы
+  // ---------------------------------------------------------------------------
+  function setLoading(isLoading) {
+    submitBtn.disabled = isLoading;
+    submitLabel.textContent = isLoading ? "Ищем…" : "Спросить";
+    const spinner = submitBtn.querySelector(".spinner");
+    if (isLoading && !spinner) submitBtn.prepend(el("span", { className: "spinner", "aria-hidden": "true" }));
+    if (!isLoading && spinner) spinner.remove();
+    resultEl.classList.toggle("stale", isLoading);
+    resultEl.setAttribute("aria-busy", String(isLoading));
+    if (isLoading) statusEl.textContent = "Ищем ответ в базе знаний…";
+  }
+
+  function showError(message) {
+    errorEl.textContent = message;
+    errorEl.hidden = false;
+    statusEl.textContent = "";
+  }
+
+  function clearError() {
+    errorEl.hidden = true;
+    errorEl.textContent = "";
+  }
+
+  function updateCounter() {
+    const length = questionEl.value.length;
+    counterEl.textContent = `${length} / ${MAX_QUESTION_CHARS}`;
+    counterEl.classList.toggle("near-limit", length > MAX_QUESTION_CHARS * 0.9);
+  }
+
+  // Поле растёт вместе с текстом (до max-height из CSS) — длинный вопрос видно целиком.
+  function autoResize() {
+    questionEl.style.height = "auto";
+    questionEl.style.height = `${questionEl.scrollHeight + 2}px`;
+  }
+
+  function readTopK() {
+    const value = Number.parseInt(topKEl.value, 10);
+    if (!Number.isInteger(value)) return null; // null → сервер возьмёт top_k из конфига
+    return Math.min(MAX_TOP_K, Math.max(1, value));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Запросы к API
+  // ---------------------------------------------------------------------------
+  // Понятное сообщение вместо «HTTP 422»: FastAPI кладёт подробности в поле detail.
+  function describeHttpError(status, body) {
+    const detail = body && body.detail;
+    if (status === 422 && Array.isArray(detail)) {
+      const reasons = detail.map((item) => (item && item.msg) || JSON.stringify(item)).join("; ");
+      return `Запрос не прошёл проверку: ${reasons}`;
+    }
+    if (typeof detail === "string" && detail) return `Ошибка ${status}: ${detail}`;
+    if (status === 503) return "Сервис ещё загружает индекс. Повторите через несколько секунд.";
+    if (status >= 500) return `Внутренняя ошибка сервера (${status}). Подробности — в логах сервиса.`;
+    return `Сервер ответил кодом ${status}.`;
+  }
+
+  async function ask(question, topK) {
+    if (inFlight) inFlight.abort();
+    const controller = new AbortController();
+    inFlight = controller;
+
+    clearError();
+    setLoading(true);
+    const startedAt = performance.now();
+    try {
+      let response;
+      try {
+        response = await fetch(ASK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ question, top_k: topK }),
+          signal: controller.signal,
+        });
+      } catch (networkError) {
+        if (networkError.name === "AbortError") return;
+        throw new Error("Не удалось связаться с сервером. Проверьте, что сервис запущен.");
+      }
+      const body = await response.json().catch(() => null);
+      // Пока читали тело, пользователь мог задать новый вопрос: устаревший ответ не показываем.
+      if (controller.signal.aborted) return;
+      if (!response.ok) throw new Error(describeHttpError(response.status, body));
+      if (!body || typeof body !== "object") throw new Error("Сервер вернул ответ в неожиданном формате.");
+      renderResult(body, performance.now() - startedAt);
+    } catch (error) {
+      if (error.name === "AbortError" || controller.signal.aborted) return;
+      showError(error.message || String(error));
+    } finally {
+      // Сбрасываем «загрузку», только если это всё ещё актуальный запрос.
+      if (inFlight === controller) {
+        inFlight = null;
+        setLoading(false);
+      }
+    }
+  }
+
+  async function checkHealth() {
+    const healthEl = $("health");
+    try {
+      const response = await fetch(HEALTH_URL, { cache: "no-store" });
+      if (!response.ok) throw new Error(String(response.status));
+      const body = await response.json().catch(() => ({}));
+      // Формат /health может расширяться; статистику индекса показываем, только если она есть.
+      const stats = (body && (body.index_stats || body)) || {};
+      let text = "сервис готов";
+      if (Number.isFinite(stats.n_docs) && Number.isFinite(stats.n_chunks)) {
+        text += ` · ${stats.n_docs} ${plural(stats.n_docs, "документ", "документа", "документов")}`
+          + ` · ${stats.n_chunks} ${plural(stats.n_chunks, "фрагмент", "фрагмента", "фрагментов")}`;
+      }
+      healthEl.dataset.state = "ok";
+      healthEl.textContent = text;
+    } catch {
+      healthEl.dataset.state = "down";
+      healthEl.textContent = "сервис недоступен";
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Отрисовка ответа
+  // ---------------------------------------------------------------------------
+  function renderResult(data, clientMs) {
+    const contexts = Array.isArray(data.contexts) ? data.contexts : [];
+    const citations = Array.isArray(data.citations) ? data.citations : [];
+    const flags = Array.isArray(data.flags) ? data.flags.map(String) : [];
+    const abstained = Boolean(data.abstained);
+
+    // [n] в ответе — номер фрагмента в списке, который видел генератор. Обычно он совпадает
+    // с позицией в contexts, но guardrails могут убрать фрагмент целиком (drop_chunk), и номера
+    // разъедутся. Надёжная связь — chunk_id из citations, поэтому сверяем ссылки по нему.
+    const contextsByChunk = new Map();
+    for (const ctx of contexts) {
+      if (ctx && ctx.chunk_id != null) contextsByChunk.set(String(ctx.chunk_id), ctx);
+    }
+    const contextsByCitation = new Map();
+    for (const citation of citations) {
+      const number = Number(citation && citation.index);
+      const ctx = contextsByChunk.get(String(citation && citation.chunk_id));
+      if (Number.isInteger(number) && ctx) contextsByCitation.set(number, ctx);
+    }
+    const citedChunks = new Set([...contextsByCitation.values()].map((ctx) => String(ctx.chunk_id)));
+    // Флаги вида "prompt_injection:{chunk_id}" — какие фрагменты содержали подозрительные инструкции.
+    const injectedChunks = new Set(
+      flags.filter((f) => f.startsWith(`${INJECTION_PREFIX}:`)).map((f) => f.slice(INJECTION_PREFIX.length + 1)));
+    const hasInjection = flags.some((f) => f === INJECTION_PREFIX || f.startsWith(`${INJECTION_PREFIX}:`));
+
+    renderBadges({ abstained, confidence: data.confidence, flags, hasInjection, injectedChunks });
+    renderAnswer(String(data.answer ?? ""), contextsByCitation, abstained);
+    renderTimings(data.timings_ms, clientMs);
+    renderContexts(contexts, citedChunks, injectedChunks, abstained);
+
+    introEl.hidden = true;
+    resultEl.hidden = false;
+    statusEl.textContent = abstained
+      ? "Ответа в базе знаний нет."
+      : `Ответ готов. ${citedChunks.size} ${plural(citedChunks.size, "ссылка", "ссылки", "ссылок")} на источники.`;
+  }
+
+  function renderBadges({ abstained, confidence, flags, hasInjection, injectedChunks }) {
+    const badges = [];
+    if (abstained) {
+      const lowConfidence = flags.includes("low_confidence");
+      badges.push(el("span", {
+        className: "badge abstain",
+        title: lowConfidence
+          ? "Уверенность поиска ниже калиброванного порога — ассистент не стал отвечать"
+          : "Генератор не нашёл ответа в найденных фрагментах",
+      }, icon("info"), "Нет ответа в базе"));
+    } else {
+      badges.push(el("span", { className: "badge ok" }, icon("check"), "Ответ по базе знаний"));
+    }
+
+    if (typeof confidence === "number" && Number.isFinite(confidence)) {
+      badges.push(el("span", {
+        className: "badge neutral",
+        title: "Насколько поиск уверен в лучшем фрагменте (score реранкера или плотного поиска). "
+          + "Ниже порога ассистент отказывается отвечать.",
+      }, icon("gauge"), "Уверенность ", el("span", { className: "num", text: formatScore(confidence) })));
+    }
+
+    if (hasInjection) {
+      const affected = [...injectedChunks].join(", ");
+      badges.push(el("span", {
+        className: "badge warn",
+        title: affected
+          ? `Подозрительный текст во фрагментах: ${affected}. Он обработан как данные, а не как команда.`
+          : "Во фрагментах найден текст, похожий на инструкцию для ИИ.",
+      }, icon("alert"), "В источниках найдена попытка prompt injection"));
+    }
+    if (flags.includes("question_injection")) {
+      badges.push(el("span", {
+        className: "badge warn",
+        title: "Вопрос содержит фразы, похожие на попытку переписать инструкции ассистента.",
+      }, icon("alert"), "Вопрос похож на prompt injection"));
+    }
+
+    // Прочие флаги (кроме уже показанных) — как есть: полезно при отладке.
+    const known = (f) => f === "low_confidence" || f === "question_injection"
+      || f === INJECTION_PREFIX || f.startsWith(`${INJECTION_PREFIX}:`);
+    for (const flag of flags.filter((f) => !known(f))) {
+      badges.push(el("span", { className: "badge neutral", text: flag }));
+    }
+    badgesEl.replaceChildren(...badges);
+  }
+
+  // Превращает «… 28 дней [1]. … [2, 3]» в текст с кнопками-ссылками на фрагменты.
+  // Регулярка совпадает с форматами, которые понимает parse_citations на сервере: [1], [1, 2], [1][3].
+  const CITATION_RE = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
+
+  function renderAnswer(text, contextsByCitation, abstained) {
+    const parts = [];
+    let cursor = 0;
+    for (const match of text.matchAll(CITATION_RE)) {
+      if (match.index > cursor) parts.push(document.createTextNode(text.slice(cursor, match.index)));
+      for (const raw of match[1].split(",")) {
+        const index = Number.parseInt(raw.trim(), 10);
+        const ctx = contextsByCitation.get(index);
+        if (ctx) {
+          // Кнопка открывает фрагмент по его позиции в списке источников (ctx.index),
+          // а подпись повторяет номер из текста ответа.
+          const label = `Источник ${index}: ${ctx.title || ctx.doc_id || "фрагмент"}`;
+          parts.push(el("button", {
+            type: "button", className: "cite", "data-index": ctx.index, title: label, "aria-label": label,
+          }, `[${index}]`));
+        } else {
+          // Номер, которого нет среди фрагментов: модель сослалась «в пустоту» — подсвечиваем.
+          parts.push(el("span", {
+            className: "cite invalid", title: "Ссылка на несуществующий фрагмент контекста",
+          }, `[${index}]`));
+        }
+      }
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < text.length) parts.push(document.createTextNode(text.slice(cursor)));
+
+    answerEl.replaceChildren(...parts);
+    answerEl.classList.toggle("abstained", abstained);
+    answerNoteEl.hidden = !abstained;
+    answerNoteEl.textContent = abstained
+      ? "Ассистент не нашёл в документах надёжного ответа и не стал его придумывать. "
+        + "Посмотрите ближайшие фрагменты ниже или переформулируйте вопрос."
+      : "";
+  }
+
+  function renderTimings(timings, clientMs) {
+    const entries = timings && typeof timings === "object" ? timings : {};
+    const stageItems = [];
+    const knownKeys = new Set(STAGES.map((s) => s.key).concat("total_ms"));
+    for (const stage of STAGES) {
+      const ms = Number(entries[stage.key]);
+      if (Number.isFinite(ms)) stageItems.push({ ...stage, ms });
+    }
+    for (const [key, value] of Object.entries(entries)) {
+      const ms = Number(value);
+      if (!knownKeys.has(key) && Number.isFinite(ms)) stageItems.push({ key, label: key, seg: "seg-4", ms });
+    }
+    const stagesSum = stageItems.reduce((sum, item) => sum + item.ms, 0);
+    const totalMs = Number.isFinite(Number(entries.total_ms)) ? Number(entries.total_ms) : stagesSum;
+
+    if (!stageItems.length && !Number.isFinite(clientMs)) {
+      timingsEl.hidden = true;
+      return;
+    }
+
+    // Полоса: доля каждого этапа во времени сервера. Нулевые этапы (например, реранкер выключен) не рисуем.
+    const scale = Math.max(totalMs, stagesSum) || 1;
+    timingBarEl.replaceChildren(...stageItems.filter((item) => item.ms > 0).map((item) =>
+      el("span", { className: item.seg, style: `width:${((item.ms / scale) * 100).toFixed(2)}%` })));
+
+    const legend = stageItems.map((item) => el("span", { className: "item" },
+      el("span", { className: `dot ${item.seg}`, "aria-hidden": "true" }),
+      `${item.label} `, el("span", { className: "value", text: formatMs(item.ms) })));
+    if (Number.isFinite(totalMs) && stageItems.length) {
+      legend.push(el("span", { className: "item" }, "Сервер всего ", el("span", { className: "value", text: formatMs(totalMs) })));
+    }
+    if (Number.isFinite(clientMs)) {
+      legend.push(el("span", { className: "item", title: "От нажатия кнопки до ответа: сервер + сеть" },
+        "В браузере ", el("span", { className: "value", text: formatMs(clientMs) })));
+    }
+    timingLegendEl.replaceChildren(...legend);
+    timingsEl.hidden = false;
+  }
+
+  function renderContexts(contexts, citedChunks, injectedChunks, abstained) {
+    sourcesTitleEl.textContent = abstained ? "Ближайшие найденные фрагменты" : "Источники";
+    sourcesCountEl.textContent = contexts.length
+      ? `${contexts.length} ${plural(contexts.length, "фрагмент", "фрагмента", "фрагментов")}`
+      : "";
+
+    if (!contexts.length) {
+      contextsEl.replaceChildren(el("li", { className: "empty", text: "Поиск не нашёл подходящих фрагментов." }));
+      return;
+    }
+
+    const items = contexts.map((ctx) => {
+      const index = Number(ctx.index);
+      const isCited = citedChunks.has(String(ctx.chunk_id));
+      const isInjected = injectedChunks.has(String(ctx.chunk_id));
+
+      const tags = el("span", { className: "tags" },
+        isCited ? el("span", { className: "tag cited", text: "в ответе" }) : null,
+        isInjected ? el("span", { className: "tag warn", text: "подозрительный текст" }) : null);
+
+      const summary = el("summary", {},
+        el("span", { className: "ctx-index", text: Number.isInteger(index) ? index : "?" }),
+        el("span", { className: "ctx-head" },
+          el("span", { className: "ctx-title", text: ctx.title || ctx.doc_id || "Без названия" }),
+          ctx.section ? el("span", { className: "ctx-section", text: ctx.section }) : null),
+        el("span", { className: "ctx-meta" },
+          tags,
+          el("span", { className: "score", title: "Score релевантности на последнем этапе поиска" },
+            `score ${formatScore(ctx.score)}`),
+          el("span", { className: "chevron" }, icon("chevron", 16))));
+
+      const body = el("div", { className: "ctx-body" },
+        el("p", { className: "ctx-ids" },
+          "документ ", el("code", { text: ctx.doc_id ?? "—" }), " · фрагмент ", el("code", { text: ctx.chunk_id ?? "—" })),
+        isInjected ? el("p", {
+          className: "ctx-warning",
+          text: "В этом фрагменте есть текст, похожий на инструкцию для ИИ (prompt injection). "
+            + "Ассистент воспринимает документы как данные: перед генерацией такая строка обрабатывается защитными правилами.",
+        }) : null,
+        el("p", { className: "ctx-text", text: ctx.text ?? "" }));
+
+      return el("li", {
+        className: `ctx${isCited ? " cited" : ""}`,
+        id: Number.isInteger(index) ? `ctx-${index}` : null,
+      }, el("details", {}, summary, body));
+    });
+    contextsEl.replaceChildren(...items);
+  }
+
+  // Раскрывает фрагмент [n], прокручивает к нему и ненадолго подсвечивает.
+  function openContext(index) {
+    const item = document.getElementById(`ctx-${index}`);
+    if (!item) return;
+    const details = item.querySelector("details");
+    details.open = true;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    item.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
+    item.classList.remove("flash");
+    void item.offsetWidth; // перезапуск CSS-анимации при повторном клике
+    item.classList.add("flash");
+    details.querySelector("summary").focus({ preventScroll: true });
+  }
+
+  // ---------------------------------------------------------------------------
+  // События
+  // ---------------------------------------------------------------------------
+  function submitQuestion() {
+    const question = questionEl.value.trim();
+    if (!question) {
+      showError("Введите вопрос.");
+      questionEl.focus();
+      return;
+    }
+    ask(question.slice(0, MAX_QUESTION_CHARS), readTopK());
+  }
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitQuestion();
+  });
+
+  questionEl.addEventListener("keydown", (event) => {
+    // isComposing: не отправляем, пока пользователь набирает текст через IME.
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      submitQuestion();
+    }
+  });
+
+  questionEl.addEventListener("input", () => {
+    updateCounter();
+    autoResize();
+  });
+
+  // Одна подписка на весь блок ответа вместо обработчика на каждой ссылке (делегирование событий).
+  answerEl.addEventListener("click", (event) => {
+    const button = event.target.closest("button.cite");
+    if (button) openContext(Number(button.dataset.index));
+  });
+
+  $("examples").addEventListener("click", (event) => {
+    const chip = event.target.closest("button.chip");
+    if (!chip) return;
+    questionEl.value = chip.dataset.question || "";
+    updateCounter();
+    autoResize();
+    submitQuestion();
+  });
+
+  updateCounter();
+  checkHealth();
+  // На телефоне автофокус сразу открыл бы клавиатуру поверх страницы — фокусируем только при наличии мыши.
+  if (window.matchMedia("(hover: hover)").matches) questionEl.focus();
+})();
+</script>
+</body>
+</html>
