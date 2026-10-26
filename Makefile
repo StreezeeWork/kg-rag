@@ -50,8 +50,12 @@ data: ## Собрать data/eval/gold.jsonl из data/eval/parts и прове�
 	$(PYTHON) -m kbrag build-gold
 	$(PYTHON) -m kbrag validate-data
 
-eval: ## Оценить один конфиг: make eval CONFIG=configs/default.yaml NAME=neural
-	$(PYTHON) -m kbrag eval --config $(CONFIG) --name $(NAME)
+# --save-calibration: заодно сохранить подобранный на dev порог отказа в abstention.calibration_path
+# конфига (offline → reports/calibration_offline.json, default → reports/calibration.json).
+# Этот файл читает сервис: без него `make serve` и Docker-образ никогда не отказываются от ответа.
+# Файлы калибровки лежат в git — после изменения поиска, корпуса или эталона закоммитьте обновлённый.
+eval: ## Оценить конфиг и сохранить порог отказа для сервиса: make eval CONFIG=configs/default.yaml NAME=neural
+	$(PYTHON) -m kbrag eval --config $(CONFIG) --name $(NAME) --save-calibration
 
 grid: ## Прогнать сетку экспериментов → reports/grid/leaderboard.md (GRID_ARGS="--include-heavy")
 	$(PYTHON) -m kbrag grid --experiments $(EXPERIMENTS) $(GRID_ARGS)

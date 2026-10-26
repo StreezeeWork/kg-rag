@@ -67,7 +67,16 @@ jobs:
         # Порог: офлайн-конфиг даёт recall@5 = 0.863 на test; минус запас ~0.05 и округление
         # вниз до 0.05 → 0.80. Оценка детерминирована, так что запас ловит именно регрессии
         # (правки нарезки, поиска или эталона), а не шум. Улучшили поиск — поднимите порог.
-        run: kbrag eval --config configs/offline.yaml --name ci --fail-under recall@5=0.80
+        # --save-calibration перезаписывает reports/calibration_offline.json свежим порогом;
+        # закоммиченную версию сначала откладываем, чтобы сравнить на следующем шаге.
+        run: |
+          cp reports/calibration_offline.json "$RUNNER_TEMP/calibration_committed.json"
+          kbrag eval --config configs/offline.yaml --name ci --fail-under recall@5=0.80 --save-calibration
+
+      - name: Check abstention calibration is up to date
+        # Порог отказа лежит в git (его читает сервис). Если правка корпуса или эталона сдвинула
+        # порог, а файл не обновили, — падаем. Исправление: `make eval` и коммит файла калибровки.
+        run: python scripts/check_calibration.py "$RUNNER_TEMP/calibration_committed.json" reports/calibration_offline.json
 
       - name: Upload reports
         # always(): отчёт нужен и тогда, когда quality gate не пройден, — чтобы понять, что сломалось.

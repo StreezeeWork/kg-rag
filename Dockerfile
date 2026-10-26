@@ -48,8 +48,11 @@ RUN if [ "$INSTALL_NEURAL" = "true" ]; then \
 # Данные и конфиги — отдельными слоями: правка документа не заставляет переустанавливать пакет.
 COPY configs ./configs
 COPY data ./data
-# Из reports/ в образ попадают только файлы калибровки порога (см. .dockerignore):
-# если вы запускали `make eval`, сервис в контейнере сразу умеет отказываться от ответа.
+# Из reports/ в образ попадают только файлы калибровки порога отказа (см. .dockerignore).
+# reports/calibration_offline.json лежит в git, поэтому офлайн-образ даже из свежего клона сразу
+# умеет отвечать «нет ответа». Для configs/default.yaml порог появится после
+# `make eval CONFIG=configs/default.yaml NAME=neural` (reports/calibration.json) и пересборки образа.
+# Порог не подхватился — GET /health покажет "abstention_threshold": null.
 COPY reports/ ./reports/
 
 # Каталоги, куда сервис пишет во время работы (кэш моделей и эмбеддингов, отчёты), принадлежат app.
