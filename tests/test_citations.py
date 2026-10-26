@@ -18,8 +18,13 @@ def make_context(docs: list[Document], doc_id: str, needle: str) -> ScoredChunk:
     for i, match in enumerate(_PARAGRAPH_RE.finditer(doc.text)):
         if needle in match.group():
             chunk = Chunk(
-                chunk_id=f"{doc_id}::{i:03d}", doc_id=doc_id, text=match.group(),
-                start=match.start(), end=match.end(), title=doc.title, metadata=dict(doc.metadata),
+                chunk_id=f"{doc_id}::{i:03d}",
+                doc_id=doc_id,
+                text=match.group(),
+                start=match.start(),
+                end=match.end(),
+                title=doc.title,
+                metadata=dict(doc.metadata),
             )
             return ScoredChunk(chunk=chunk, score=1.0, source="bm25")
     raise AssertionError(f"абзац с {needle!r} не найден в {doc_id}")
@@ -43,7 +48,9 @@ def test_single_citation_is_bound_to_its_fragment(contexts: list[ScoredChunk]) -
 
     assert invalid == 0
     assert citations == [
-        Citation(index=1, chunk_id="hr-vacation::002", doc_id="hr-vacation", title="Ежегодный оплачиваемый отпуск")
+        Citation(
+            index=1, chunk_id="hr-vacation::002", doc_id="hr-vacation", title="Ежегодный оплачиваемый отпуск"
+        )
     ]
 
 
