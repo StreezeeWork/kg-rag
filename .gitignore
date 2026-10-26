@@ -1,0 +1,31 @@
+# Виртуальные окружения
+.venv/
+venv/
+
+# Python: байт-код и артефакты сборки пакета
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Кэши инструментов
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Кэш эмбеддингов и скачанных моделей — пересоздаётся автоматически
+.cache/
+
+# Отчёты генерируются командами `make eval` / `make grid`; в git держим только пустую папку
+reports/*
+!reports/.gitkeep
+
+# Секреты и локальные настройки (шаблон — .env.example, он в git)
+.env
+
+# Редакторы и ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kbrag"
+version = "0.1.0"
+description = "RAG-ассистент по корпоративной базе знаний с воспроизводимой оценкой качества (retrieval + generation)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "pyyaml>=6.0",
+    "pydantic>=2.6",
+    "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "snowballstemmer>=2.2",
+]
+
+[project.optional-dependencies]
+# Нейросетевые эмбеддинги и реранкер. Без них проект работает на BM25 + LSA.
+neural = [
+    "sentence-transformers>=3.0",
+    "torch>=2.2",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+kbrag = "kbrag.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kbrag = ["api/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+markers = [
+    "neural: тесты, которым нужны sentence-transformers и скачанные модели (пропускаются, если их нет)",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
