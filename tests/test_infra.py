@@ -140,3 +140,71 @@ def test_check_calibration_exit_codes(
 def test_lint_checks_formatting_locally_and_in_ci() -> None:
     assert "ruff format --check" in make_recipe("lint")
     assert "ruff format --check" in (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+
+# --- scripts/check_part.py: авторские проверки эталона --------------------------------------------
+
+PART_DOC = (
+    "---\nid: hr-test\ntitle: Тестовый документ\ndepartment: HR\nstatus: active\nupdated: 2025-01-01\n---\n\n"
+    "# Тестовый документ\n\nОтпуск длится 28 календарных дней и делится на части по желанию сотрудника.\n"
+)
+
+
+def write_part(path: Path, quote: str = "Отпуск длится 28 календарных дней") -> Path:
+    record = {
+        "id": "q-1",
+        "question": "Сколько длится отпуск?",
+        "answer": "28 календарных дней.",
+        "key_facts": ["28 календарных дней"],
+        "evidence": [{"doc_id": "hr-test", "quote": quote}],
+        "type": "numeric",
+    }
+    path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture(scope="module")
+def check_part() -> ModuleType:
+    return load_script("check_part")
+
+
+def test_check_part_reads_document_with_bom(
+    check_part: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Блокнот Windows сохраняет UTF-8 с BOM; основной загрузчик это понимает — скрипт тоже должен.
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "hr-test.md").write_text("﻿" + PART_DOC, encoding="utf-8")
+    part = write_part(tmp_path / "part.jsonl")
+
+    assert check_part.main([str(part), "--corpus", str(corpus)]) == 0
+    assert "ERROR" not in capsys.readouterr().out
+
+
+def test_check_part_counts_missing_front_matter_as_error(
+    check_part: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Раньше скрипт печатал ERROR, но всё равно заканчивал «OK» с кодом 0.
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "no-meta.md").write_text("# Документ без шапки\n\nТекст.\n", encoding="utf-8")
+    part = tmp_path / "empty.jsonl"
+    part.write_text("", encoding="utf-8")
+
+    assert check_part.main([str(part), "--corpus", str(corpus)]) == 1
+    out = capsys.readouterr().out
+    assert "нет front matter" in out
+    assert "ОШИБОК: 1" in out
+
+
+def test_check_part_warning_states_the_range_it_checks(
+    check_part: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "hr-test.md").write_text(PART_DOC, encoding="utf-8")
+    part = write_part(tmp_path / "part.jsonl", quote="28 календарных дней")  # 3 слова < 5
+
+    assert check_part.main([str(part), "--corpus", str(corpus)]) == 0  # предупреждение не ошибка
+    lo, hi = check_part.QUOTE_WORDS
+    assert f"цитата из 3 слов (ожидается {lo}–{hi})" in capsys.readouterr().out
