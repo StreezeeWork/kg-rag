@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 
 def _build_bm25(cfg: AppConfig) -> BM25Retriever:
     params = cfg.retrieval.bm25
-    return BM25Retriever(k1=params.k1, b=params.b, with_header=cfg.chunking.with_header)
+    return BM25Retriever(
+        k1=params.k1,
+        b=params.b,
+        with_header=cfg.chunking.with_header,
+        split_compounds=params.split_compounds,
+    )
 
 
 def _build_dense(cfg: AppConfig) -> DenseRetriever:

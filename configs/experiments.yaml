@@ -16,7 +16,8 @@
 # (src/kbrag/eval/metrics.py) по per_question. Интервал включает 0 — гипотеза данными не
 # подтверждена (разница в пределах шума). Метрики ответа (FactRecall) сравнивают только вместе
 # с FAR: порог отказа у каждого эксперимента свой. Пары для сравнения:
-#   bm25_fixed → bm25_recursive_noheader (нарезка) → bm25_recursive (заголовки);
+#   bm25_fixed → bm25_recursive_noheader (нарезка) → bm25_recursive (заголовки)
+#     → bm25_recursive_split_mixed (части составных токенов);
 #   bm25_recursive → lsa_dense (тип поиска) → hybrid_bm25_lsa (гибрид) → *_weighted (слияние);
 #   lsa_dense → e5_dense и hybrid_bm25_lsa → hybrid_bm25_e5 (модель эмбеддингов);
 #   hybrid_bm25_e5 → *_rerank (реранкер) → *_chunk100 → *_chunk60 (размер фрагмента: 180 → 100 → 60);
@@ -56,6 +57,14 @@ experiments:
     overrides:
       chunking: {strategy: recursive, chunk_size: 180, with_header: true}
       retrieval: {mode: bm25}
+
+  - name: bm25_recursive_split_mixed
+    description: "Гипотеза: части смешанных токенов («vpn-шлюз» → + «vpn», «шлюз») помогают вопросам, где термин записан иначе, чем в документе"
+    requires_neural: false
+    heavy: false
+    overrides:
+      chunking: {strategy: recursive, chunk_size: 180, with_header: true}
+      retrieval: {mode: bm25, bm25: {split_compounds: mixed}}
 
   # --- Плотный поиск без нейросетей и гибрид -------------------------------------
   - name: lsa_dense

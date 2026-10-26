@@ -33,6 +33,9 @@ class ChunkingConfig(_Strict):
 class BM25Config(_Strict):
     k1: float = 1.5
     b: float = 0.75
+    # Части составных токенов («vpn-шлюз» → + «vpn», «шлюз»), см. kbrag.text.analyze:
+    # none — не добавлять, mixed — только у смеси латиницы и кириллицы, all — у любых.
+    split_compounds: Literal["none", "mixed", "all"] = "none"
 
 
 class DenseConfig(_Strict):

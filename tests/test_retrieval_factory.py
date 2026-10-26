@@ -48,6 +48,21 @@ def test_bm25_mode_uses_parameters_from_config() -> None:
     retriever = build_retriever(cfg)
     assert isinstance(retriever, BM25Retriever)
     assert (retriever.k1, retriever.b, retriever.with_header) == (0.9, 0.4, False)
+    assert retriever.split_compounds == "none"
+
+
+@pytest.mark.parametrize("mode", ["bm25", "hybrid"])
+def test_bm25_split_compounds_comes_from_config(mode: str) -> None:
+    cfg = config(mode=mode, bm25={"split_compounds": "mixed"})
+    retriever = build_retriever(cfg)
+    bm25 = retriever if isinstance(retriever, BM25Retriever) else retriever.retrievers[0]
+    assert isinstance(bm25, BM25Retriever)
+    assert bm25.split_compounds == "mixed"
+
+
+def test_bm25_split_compounds_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="split_compounds"):
+        config(mode="bm25", bm25={"split_compounds": "some"})
 
 
 def test_dense_mode_builds_lsa_with_configured_dim() -> None:

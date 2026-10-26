@@ -190,7 +190,8 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   не потокобезопасен, а `/ask` выполняется в пуле потоков.
 - `text.analyze(text, remove_stopwords=True, split_compounds="none")`: `"mixed"`/`"all"` добавляют части
   составных токенов («vpn-шлюз» → + «vpn», «шлюз»); нужно только BM25 (`BM25Retriever(split_compounds=…)`),
-  метрики и генератор работают с целыми токенами. В конфиг (`retrieval.bm25`) режим пока не выведен.
+  метрики и генератор работают с целыми токенами. Режим задаёт `retrieval.bm25.split_compounds`
+  (по умолчанию `none`; шаг сетки — `bm25_recursive_split_mixed`).
 
 **retrieval**
 - `LSAEmbedder`: если `min(dim, n_features - 1, n_docs - 1) < 1` (один документ), SVD не делается —

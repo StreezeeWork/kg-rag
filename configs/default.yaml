@@ -31,6 +31,7 @@ retrieval:
   bm25:
     k1: 1.5             # насыщение частоты слова
     b: 0.75             # нормализация на длину фрагмента
+    split_compounds: none  # «vpn-шлюз» — один терм; mixed добавляет части «vpn», «шлюз» (шаг сетки bm25_recursive_split_mixed)
   dense:
     embedder: sentence-transformers
     model: intfloat/multilingual-e5-small  # маленькая (118M) многоязычная модель: русский + быстро на CPU
