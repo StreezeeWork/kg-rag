@@ -67,7 +67,7 @@ from kbrag.eval.results import (
     metric_names,
     retrieval_metric_names,
 )
-from kbrag.generation import ABSTAIN_TEXT
+from kbrag.generation import ABSTAIN_TEXT, LLMError
 from kbrag.ingest import corpus_fingerprint, load_corpus
 from kbrag.pipeline import LOW_CONFIDENCE_FLAG, RAGPipeline
 from kbrag.retrieval import neural_available
@@ -118,14 +118,25 @@ def run_experiment(
     top_k = cfg.retrieval.top_k
     retrieve_k = max([*k_values, top_k])
     runs: list[_QuestionRun] = []
+    llm_errors = 0
     for item in gold:
         retrieved, timings = pipeline.retrieve(item.question, top_k=retrieve_k)
-        answer = pipeline.answer_with_contexts(
-            item.question, retrieved[:top_k], timings=timings, apply_threshold=False
-        )
+        try:
+            answer = pipeline.answer_with_contexts(
+                item.question, retrieved[:top_k], timings=timings, apply_threshold=False
+            )
+        except LLMError as exc:
+            # Один зависший запрос к LLM не должен обнулять часовой прогон. Вопрос засчитываем
+            # как неверный ответ (пессимистично и честно) и помечаем флагом, а итоговое число
+            # ошибок печатаем — тихо продолжать, скрыв сбой, было бы хуже, чем упасть.
+            llm_errors += 1
+            logger.warning("Вопрос %s: LLM не ответила (%s) — засчитан как неверный ответ", item.qid, exc)
+            answer = _llm_error_answer(item.question, retrieved[:top_k], timings, pipeline)
         runs.append(
             _QuestionRun(item=item, answer=answer, retrieved_ids=[s.chunk.chunk_id for s in retrieved])
         )
+    if llm_errors:
+        logger.warning("Эксперимент %r: %d из %d вопросов без ответа LLM", name, llm_errors, len(gold))
 
     # Шаг 3: порог.
     threshold = _resolve_eval_threshold(cfg, runs)
@@ -173,6 +184,30 @@ def _short_sha256(obj: Any) -> str:
     # sort_keys — чтобы порядок ключей словарей не менял хэш; default=str — для дат из шапок документов.
     payload = json.dumps(obj, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+LLM_ERROR_FLAG = "llm_error"  # флаг вопроса, на котором LLM не ответила (таймаут, 5xx и т.п.)
+
+
+def _llm_error_answer(
+    question: str, contexts: list[ScoredChunk], timings: dict[str, float], pipeline: RAGPipeline
+) -> Answer:
+    """Ответ-заглушка для вопроса, на котором LLM упала: пустой текст, флаг ``llm_error``.
+
+    Уверенность считаем как обычно — по ней на dev подбирается порог, и выбрасывать вопрос
+    из калибровки из-за сбоя генерации нельзя.
+    """
+    search_ms = timings.get("retrieve_ms", 0.0) + timings.get("rerank_ms", 0.0)
+    return Answer(
+        question=question,
+        text="",
+        citations=[],
+        contexts=contexts,
+        abstained=False,
+        timings_ms={**timings, "generate_ms": 0.0, "total_ms": search_ms},
+        flags=[LLM_ERROR_FLAG],
+        confidence=pipeline.confidence(contexts),
+    )
 
 
 @dataclass

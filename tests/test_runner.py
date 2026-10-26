@@ -27,7 +27,7 @@ from kbrag.eval.results import (
     retrieval_metric_names,
 )
 from kbrag.eval.runner import load_experiments, run_experiment, run_grid
-from kbrag.generation import ABSTAIN_TEXT, extractive
+from kbrag.generation import ABSTAIN_TEXT, LLMError, extractive
 from kbrag.pipeline import LOW_CONFIDENCE_FLAG, RAGPipeline
 from kbrag.retrieval import BM25Retriever
 from kbrag.types import Document
@@ -194,6 +194,27 @@ def test_confusable_answer_citing_archived_version_is_flagged(
     assert rows["t-001"]["stale_citation_rate"] == 0.0
     assert rows["t-005"]["stale_citation_rate"] is None  # неотвечаемый вопрос
     assert result.metrics["by_type"]["confusable"]["stale_citation_rate"] == 1.0
+
+
+def test_llm_error_on_one_question_does_not_abort_the_run(
+    gold: list[GoldItem], mini_docs: list[Document], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Регрессия: таймаут LLM на одном вопросе обрывал весь часовой прогон.
+    original = extractive.ExtractiveGenerator.generate
+
+    def flaky(self, question, contexts):
+        if "отпуск" in question and "календарных" in question:  # t-001
+            raise LLMError("таймаут запроса")
+        return original(self, question, contexts)
+
+    monkeypatch.setattr(extractive.ExtractiveGenerator, "generate", flaky)
+    result = run_experiment(make_cfg(), gold=gold, docs=mini_docs)
+    rows = rows_by_qid(result)
+
+    assert runner.LLM_ERROR_FLAG in rows["t-001"]["flags"]
+    assert rows["t-001"]["answer"] == "" and rows["t-001"]["fact_recall"] == 0.0
+    assert rows["t-001"]["recall@5"] == 1.0  # поиск отработал, упала только генерация
+    assert rows["t-003"]["fact_recall"] == 1.0  # остальные вопросы посчитаны как обычно
 
 
 def test_extractive_answer_to_confusable_question_cites_only_active_version(

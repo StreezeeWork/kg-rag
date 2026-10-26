@@ -384,6 +384,13 @@ def cmd_eval(args: argparse.Namespace) -> int:
     result = run_experiment(cfg, name=name)
     leaderboard = write_report([result], out_dir, split=cfg.eval.report_split)
     _print_eval_summary(result)
+    llm_errors = sum("llm_error" in (row.get("flags") or []) for row in result.per_question)
+    if llm_errors:
+        print(
+            f"Внимание: на {llm_errors} из {len(result.per_question)} вопросов LLM не ответила — "
+            "они засчитаны как неверные ответы (флаг llm_error в per_question).",
+            file=sys.stderr,
+        )
     print(f"Отчёт: {leaderboard}")
 
     code = _check_quality_gates(result, gates)
