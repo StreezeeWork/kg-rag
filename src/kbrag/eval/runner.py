@@ -58,6 +58,7 @@ from kbrag.eval.metrics import (
 from kbrag.eval.results import (
     BY_TYPE_KEY,
     GENERATION_METRICS,
+    METRIC_SPLITS,
     ExperimentResult,
     metric_names,
     retrieval_metric_names,
@@ -333,9 +334,10 @@ def _split_metrics(
 ) -> dict[str, dict]:
     """``{"dev": {...}, "test": {...}, "all": {...}, "by_type": {qtype: {...}}}``."""
     metrics: dict[str, dict] = {
-        "dev": aggregate_metrics([row for row in rows if row["split"] == "dev"], k_values),
-        "test": aggregate_metrics([row for row in rows if row["split"] == "test"], k_values),
-        "all": aggregate_metrics(rows, k_values),
+        split: aggregate_metrics(
+            rows if split == "all" else [row for row in rows if row["split"] == split], k_values
+        )
+        for split in METRIC_SPLITS
     }
     report_rows = rows if report_split == "all" else [row for row in rows if row["split"] == report_split]
     by_type: dict[str, dict] = {}

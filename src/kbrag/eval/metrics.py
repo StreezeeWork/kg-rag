@@ -25,6 +25,7 @@ from collections.abc import Collection, Mapping, Sequence
 import numpy as np
 
 from kbrag.eval.dataset import Span, is_relevant
+from kbrag.generation.citations import CITATION_RE
 from kbrag.text import STOPWORDS, stem, tokenize
 from kbrag.types import Chunk, Citation
 
@@ -152,8 +153,6 @@ def retrieval_metrics(
 # Генерация
 # ---------------------------------------------------------------------------
 
-# Ссылки вида [1], [1, 2]: их цифры — номера фрагментов, а не факты ответа.
-_CITATION_RE = re.compile(r"\[\d+(?:\s*,\s*\d+)*\]")
 _CYRILLIC_WORD_RE = re.compile(r"[а-я]+")
 # Хвост «гласные/й/ь (+х|м|ми)» — типичные падежные окончания.
 _SOFT_ENDING_RE = re.compile(r"[аеиоуыэюяйь]+(?:х|м|ми)?$")
@@ -172,8 +171,12 @@ _NEGATIONS = frozenset({"не", "ни", "без"})
 
 
 def strip_citations(text: str) -> str:
-    """Убирает маркеры ``[n]``, чтобы «[3]» не засчитывалось как факт «3 дня»."""
-    return _CITATION_RE.sub(" ", text)
+    """Убирает маркеры ``[n]``, чтобы «[3]» не засчитывалось как факт «3 дня».
+
+    Формат ссылки — тот же ``CITATION_RE``, что у разбора ссылок (``[1]``, ``[1, 2]``, ``[1; 3]``, ``[ 2 ]``):
+    иначе ссылку, которую пайплайн признал, метрика считала бы словами ответа.
+    """
+    return CITATION_RE.sub(" ", text)
 
 
 def soft_stem(stem: str) -> str:
@@ -258,7 +261,7 @@ def fact_recall(pred: str, key_facts: Sequence[str]) -> float | None:
 
     Строже token_f1 там, где это важно: ответ «14 календарных дней» на вопрос с фактом
     «28 календарных дней» получит 0, хотя слова почти совпадают.
-    Факт только из стоп-слов («нет») сравнивается без удаления стоп-слов.
+    Факт только из стоп-слов («да», «всегда») сравнивается без удаления стоп-слов.
     Как сравниваются отрицания, числа, время и проценты — см. ``match_terms``.
     Нет фактов → None (метрика неприменима, например для неотвечаемого вопроса).
     """

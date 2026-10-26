@@ -201,6 +201,21 @@ def test_strip_citations_removes_reference_markers() -> None:
     ]
 
 
+def test_strip_citations_uses_the_parser_citation_format() -> None:
+    # «[1; 3]» и «[ 2 ]» пайплайн признаёт ссылками — значит, и метрика не должна считать их словами.
+    assert strip_citations("Срок 5 дней [1; 3], пароль 14 символов [ 2 ].").split() == [
+        "Срок",
+        "5",
+        "дней",
+        ",",
+        "пароль",
+        "14",
+        "символов",
+        ".",
+    ]
+    assert fact_recall("Срок — 5 дней [1; 3].", ["3 дня"]) == 0.0
+
+
 def test_token_f1_word_forms_match() -> None:
     assert token_f1("28 календарных днях", "28 календарных дней") == 1.0
 
