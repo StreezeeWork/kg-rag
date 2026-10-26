@@ -43,7 +43,8 @@ class DenseConfig(_Strict):
     model: str = "intfloat/multilingual-e5-small"
     query_prefix: str | None = None  # None → определить по имени модели (e5: "query: ")
     passage_prefix: str | None = None  # None → определить по имени модели (e5: "passage: ")
-    lsa_dim: int = 256
+    # Подобрано на dev (configs/offline.yaml): при ~260 фрагментах 256 — SVD почти полного ранга ≈ TF-IDF.
+    lsa_dim: int = 128
     batch_size: int = 32
     device: str = "auto"
 

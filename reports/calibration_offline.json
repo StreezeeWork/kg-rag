@@ -1,7 +1,7 @@
 {
-  "fingerprint": "6881e231278d",
+  "fingerprint": "fbb6d4256692",
   "score_source": "dense",
-  "threshold": 0.49875402450561523,
+  "threshold": 0.6030409038066864,
   "experiment": "offline",
-  "created_at": "2026-10-26T16:18:46+00:00"
+  "created_at": "2026-10-26T16:19:32+00:00"
 }
