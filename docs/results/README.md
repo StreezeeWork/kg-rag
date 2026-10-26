@@ -10,7 +10,8 @@
 
 Условия прогона: эталон из 237 вопросов (test: 131 отвечаемый + 35 неотвечаемых), корпус из 48 документов
 (`corpus_sha256` be5fe72bcb47f3a6, `gold_sha256` f2c54f0f3e8a96ef — те же хэши стоят в `provenance` каждого
-эксперимента в `results.json`), модели e5 и реранкера — ревизии из `configs/default.yaml`, CPU, Windows 11,
+эксперимента в `results.json`), модели e5 и реранкера — те же снапшоты, что закреплены в `configs/default.yaml`
+(в `experiments.yaml` ревизия не задана, в кэше лежала ровно эта), CPU, Windows 11,
 Python 3.12, код коммита 1ac846b (`environment.git_sha` в `results.json`).
 
 Как читать:
