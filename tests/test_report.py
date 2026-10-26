@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import math
 import platform
+import re
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from kbrag.eval import report
 from kbrag.eval.report import (
     ENVIRONMENT_PACKAGES,
     format_number,
@@ -222,6 +224,17 @@ def test_results_json_records_environment(tmp_path: Path, results: list[Experime
     assert environment["python"] == platform.python_version()
     assert environment["packages"]["numpy"] == np.__version__
     assert set(environment["packages"]) == set(ENVIRONMENT_PACKAGES)
+    # Тесты запускаются из git-клона: коммит записан (40 hex-символов), флаг правок — bool.
+    assert re.fullmatch(r"[0-9a-f]{40}", environment["git_sha"] or "")
+    assert isinstance(environment["git_dirty"], bool)
+
+
+def test_git_state_without_git_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(report.subprocess, "run", missing_git)
+    assert report.git_state() == {"git_sha": None, "git_dirty": None}
 
 
 def test_per_question_jsonl_content(tmp_path: Path, results: list[ExperimentResult]) -> None:

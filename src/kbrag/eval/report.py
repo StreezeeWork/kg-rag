@@ -28,6 +28,7 @@ import json
 import math
 import platform
 import re
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,7 @@ CONFUSABLE_TYPE = "confusable"
 ENVIRONMENT_PACKAGES = (
     "kbrag",
     "numpy",
+    "scipy",
     "scikit-learn",
     "snowballstemmer",
     "sentence-transformers",
@@ -441,12 +443,38 @@ def render_leaderboard(results: Sequence[ExperimentResult], split: str = "test")
 # ---------------------------------------------------------------------------
 
 
+def git_state() -> dict[str, Any]:
+    """Коммит кода, на котором получен отчёт, и были ли незакоммиченные правки отслеживаемых файлов.
+
+    Вне git-репозитория (Docker-образ, установленный пакет) или без git — оба поля None.
+    """
+
+    def git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        return completed.stdout.strip()
+
+    try:
+        sha = git("rev-parse", "HEAD")
+        dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
+    except (OSError, subprocess.SubprocessError):
+        return {"git_sha": None, "git_dirty": None}
+    return {"git_sha": sha, "git_dirty": dirty}
+
+
 def environment_info() -> dict[str, Any]:
-    """Где получен отчёт: версии Python и пакетов, влияющих на числа.
+    """Где получен отчёт: версии Python и пакетов, влияющих на числа, и коммит кода.
 
     Обновление torch, transformers или sentence-transformers может сдвинуть эмбеддинги,
-    а scikit-learn — LSA; без этих строк расхождение двух отчётов с одинаковым конфигом
-    не объяснить. Ревизии моделей Hugging Face здесь пока не фиксируются.
+    а scikit-learn/scipy — LSA; без этих строк расхождение двух отчётов с одинаковым конфигом
+    не объяснить. Модели и их ревизии (``revision``) записаны в конфиге каждого эксперимента.
+    Времени запуска здесь нет намеренно: отчёты одного кода и данных сравниваются через diff.
     """
     packages: dict[str, str | None] = {}
     for name in ENVIRONMENT_PACKAGES:
@@ -454,7 +482,12 @@ def environment_info() -> dict[str, Any]:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             packages[name] = None  # не установлен (например, офлайн-режим без нейросетей)
-    return {"python": platform.python_version(), "platform": platform.platform(), "packages": packages}
+    return {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "packages": packages,
+        **git_state(),
+    }
 
 
 def write_report(results: Sequence[ExperimentResult], out_dir: str | Path, split: str = "test") -> Path:
