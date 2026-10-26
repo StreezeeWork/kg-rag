@@ -338,18 +338,26 @@ def test_security_headers_and_page_csp(client: TestClient) -> None:
     assert f"'sha256-{digest}'" in csp and "unsafe-inline" not in csp.split("script-src")[1].split(";")[0]
 
 
-def test_service_logging_is_configured_when_uvicorn_left_it_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, logging.INFO), ("", logging.INFO), ("warning", logging.WARNING), ("verbose", logging.INFO)],
+)
+def test_service_logging_is_configured_when_uvicorn_left_it_empty(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: int
+) -> None:
     # uvicorn настраивает только свои логгеры: без этого INFO-строки kbrag («порог загружен»,
-    # «сервис готов») в Docker терялись.
+    # «сервис готов») в Docker терялись. Пустой KBRAG_LOG_LEVEL (так он лежит в .env.example)
+    # и опечатка в уровне не должны ронять старт сервиса.
     kbrag_logger = logging.getLogger("kbrag")
     monkeypatch.setattr(logging.root, "handlers", [])
     monkeypatch.setattr(kbrag_logger, "level", kbrag_logger.level)
-    monkeypatch.delenv("KBRAG_LOG_LEVEL", raising=False)
+    if value is not None:
+        monkeypatch.setenv("KBRAG_LOG_LEVEL", value)
 
     _configure_service_logging()
 
     assert logging.root.handlers
-    assert kbrag_logger.getEffectiveLevel() == logging.INFO
+    assert kbrag_logger.getEffectiveLevel() == expected
 
 
 # ---------------------------------------------------------------------------

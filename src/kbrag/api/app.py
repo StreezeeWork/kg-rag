@@ -552,14 +552,24 @@ def _configure_service_logging() -> None:
 
     uvicorn настраивает только свои логгеры, и без этого строки kbrag уровня INFO («Порог отказа
     загружен», «Сервис готов», «ask: …») терялись. Если логирование уже настроено (``kbrag serve``,
-    тесты), ничего не меняем. Уровень — ``$KBRAG_LOG_LEVEL`` (по умолчанию INFO).
+    тесты), ничего не меняем. Уровень — ``$KBRAG_LOG_LEVEL`` (по умолчанию INFO). Пустое значение
+    (``KBRAG_LOG_LEVEL=`` из .env) — тоже INFO; опечатка в уровне не роняет старт сервиса, а даёт
+    предупреждение и INFO.
     """
     if logging.getLogger().handlers:
         return
     logging.basicConfig(
         level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"
     )
-    logging.getLogger("kbrag").setLevel(os.environ.get(LOG_LEVEL_ENV_VAR, "INFO").upper())
+    kbrag_logger = logging.getLogger("kbrag")
+    level_name = (os.environ.get(LOG_LEVEL_ENV_VAR) or "INFO").strip().upper()
+    try:
+        kbrag_logger.setLevel(level_name)
+    except ValueError:
+        kbrag_logger.setLevel(logging.INFO)
+        kbrag_logger.warning(
+            "Неизвестный уровень логов %s=%r — используется INFO", LOG_LEVEL_ENV_VAR, level_name
+        )
 
 
 def _add_metrics_middleware(app: FastAPI, metrics: ServiceMetrics) -> None:
