@@ -16,7 +16,12 @@ from kbrag.types import Document
 
 MINI_DOCS_RAW: dict[str, tuple[dict[str, str], str]] = {
     "hr-vacation": (
-        {"title": "Ежегодный оплачиваемый отпуск", "department": "HR", "status": "active", "updated": "2025-03-01"},
+        {
+            "title": "Ежегодный оплачиваемый отпуск",
+            "department": "HR",
+            "status": "active",
+            "updated": "2025-03-01",
+        },
         "# Ежегодный оплачиваемый отпуск\n\n"
         "## 1. Продолжительность\n\n"
         "Продолжительность ежегодного оплачиваемого отпуска составляет 28 календарных дней. "
@@ -26,7 +31,12 @@ MINI_DOCS_RAW: dict[str, tuple[dict[str, str], str]] = {
         "Руководитель согласует заявление в течение 3 рабочих дней.\n",
     ),
     "hr-remote-2023": (
-        {"title": "Политика удалённой работы (редакция 2023)", "department": "HR", "status": "archived", "updated": "2023-02-10"},
+        {
+            "title": "Политика удалённой работы (редакция 2023)",
+            "department": "HR",
+            "status": "archived",
+            "updated": "2023-02-10",
+        },
         "# Политика удалённой работы (редакция 2023)\n\n"
         "## 1. Формат работы\n\n"
         "Сотрудник может работать удалённо не более 2 дней в неделю по согласованию с руководителем.\n\n"
@@ -34,7 +44,12 @@ MINI_DOCS_RAW: dict[str, tuple[dict[str, str], str]] = {
         "Компенсация расходов на домашний интернет составляет 1000 рублей в месяц.\n",
     ),
     "hr-remote-2025": (
-        {"title": "Политика удалённой работы", "department": "HR", "status": "active", "updated": "2025-01-15"},
+        {
+            "title": "Политика удалённой работы",
+            "department": "HR",
+            "status": "active",
+            "updated": "2025-01-15",
+        },
         "# Политика удалённой работы\n\n"
         "## 1. Формат работы\n\n"
         "Сотрудник может работать удалённо до 3 дней в неделю, график фиксируется в системе «Место».\n"
@@ -43,7 +58,12 @@ MINI_DOCS_RAW: dict[str, tuple[dict[str, str], str]] = {
         "Компенсация расходов на домашний интернет составляет 1500 рублей в месяц и выплачивается вместе с зарплатой.\n",
     ),
     "it-vpn": (
-        {"title": "Подключение к корпоративному VPN", "department": "IT", "status": "active", "updated": "2025-04-20"},
+        {
+            "title": "Подключение к корпоративному VPN",
+            "department": "IT",
+            "status": "active",
+            "updated": "2025-04-20",
+        },
         "# Подключение к корпоративному VPN\n\n"
         "## 1. Клиент\n\n"
         "Для подключения к VPN используется клиент «Шлюз», его устанавливают через заявку в сервис-деске «Помощник».\n\n"
@@ -59,7 +79,12 @@ MINI_GOLD: list[dict] = [
         "question": "Сколько календарных дней длится ежегодный отпуск?",
         "answer": "28 календарных дней.",
         "key_facts": ["28 календарных дней"],
-        "evidence": [{"doc_id": "hr-vacation", "quote": "Продолжительность ежегодного оплачиваемого отпуска составляет 28 календарных дней."}],
+        "evidence": [
+            {
+                "doc_id": "hr-vacation",
+                "quote": "Продолжительность ежегодного оплачиваемого отпуска составляет 28 календарных дней.",
+            }
+        ],
         "type": "numeric",
         "split": "test",
     },
@@ -68,7 +93,12 @@ MINI_GOLD: list[dict] = [
         "question": "За сколько дней до начала нужно подать заявление на отпуск?",
         "answer": "Не позднее чем за 14 дней, через «Нимбус.Люди».",
         "key_facts": ["14 дней"],
-        "evidence": [{"doc_id": "hr-vacation", "quote": "Заявление на отпуск подаётся в HR-портале «Нимбус.Люди» не позднее чем за 14 дней до начала отпуска."}],
+        "evidence": [
+            {
+                "doc_id": "hr-vacation",
+                "quote": "Заявление на отпуск подаётся в HR-портале «Нимбус.Люди» не позднее чем за 14 дней до начала отпуска.",
+            }
+        ],
         "type": "procedural",
         "split": "dev",
     },
@@ -77,7 +107,9 @@ MINI_GOLD: list[dict] = [
         "question": "Сколько дней в неделю сейчас можно работать из дома?",
         "answer": "До 3 дней в неделю.",
         "key_facts": ["3 дней"],
-        "evidence": [{"doc_id": "hr-remote-2025", "quote": "Сотрудник может работать удалённо до 3 дней в неделю"}],
+        "evidence": [
+            {"doc_id": "hr-remote-2025", "quote": "Сотрудник может работать удалённо до 3 дней в неделю"}
+        ],
         "type": "confusable",
         "split": "test",
     },
@@ -111,7 +143,12 @@ def _front_matter(doc_id: str, meta: dict[str, str]) -> str:
 def mini_docs() -> list[Document]:
     """Документы в том виде, в каком их вернёт loader (text = тело без front matter)."""
     return [
-        Document(doc_id=doc_id, title=meta["title"], text=body, metadata={k: v for k, v in meta.items() if k != "title"})
+        Document(
+            doc_id=doc_id,
+            title=meta["title"],
+            text=body,
+            metadata={k: v for k, v in meta.items() if k != "title"},
+        )
         for doc_id, (meta, body) in sorted(MINI_DOCS_RAW.items())
     ]
 

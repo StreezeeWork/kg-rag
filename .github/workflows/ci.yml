@@ -50,6 +50,10 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Format check (ruff)
+        # Единый стиль без споров на ревью. Упало — выполните локально `make format` и закоммитьте.
+        run: ruff format --check .
+
       - name: Unit tests
         # Тесты с маркером neural пропускаются сами: KBRAG_RUN_NEURAL не равна "1".
         run: pytest

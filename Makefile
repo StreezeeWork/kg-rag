@@ -27,7 +27,7 @@ COMPOSE_ARGS ?=
 # `make` без аргументов показывает справку, а не запускает что-то случайное.
 .DEFAULT_GOAL := help
 # Цели — это команды, а не файлы: без .PHONY файл с именем `test` сломал бы `make test`.
-.PHONY: help install install-neural lint test data eval grid serve docker-build docker-up
+.PHONY: help install install-neural lint format test data eval grid serve docker-build docker-up
 
 help: ## Показать список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -40,8 +40,14 @@ install-neural: ## То же + sentence-transformers и torch (CPU) — нужн
 	$(PYTHON) -m pip install --index-url $(TORCH_INDEX) "torch>=2.2"
 	$(PYTHON) -m pip install -e ".[dev,neural]"
 
-lint: ## Проверить стиль и типичные ошибки (ruff)
+# Те же две проверки, что в CI: ошибки и стиль (ruff check) + единое форматирование (ruff format --check).
+lint: ## Проверить код: типичные ошибки и форматирование (ruff), ничего не меняя
 	$(PYTHON) -m ruff check .
+	$(PYTHON) -m ruff format --check .
+
+format: ## Отформатировать код и исправить то, что ruff умеет чинить сам
+	$(PYTHON) -m ruff format .
+	$(PYTHON) -m ruff check --fix .
 
 test: ## Запустить тесты (нейросетевые пропускаются, пока не задано KBRAG_RUN_NEURAL=1)
 	$(PYTHON) -m pytest

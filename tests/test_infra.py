@@ -132,3 +132,11 @@ def test_check_calibration_exit_codes(
     assert "make eval" in capsys.readouterr().err  # сообщение подсказывает, как починить
 
     assert check_calibration.main([str(committed), str(tmp_path / "missing.json")]) == 1
+
+
+# --- Форматирование: локальный `make lint` и CI проверяют одно и то же --------------------------
+
+
+def test_lint_checks_formatting_locally_and_in_ci() -> None:
+    assert "ruff format --check" in make_recipe("lint")
+    assert "ruff format --check" in (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

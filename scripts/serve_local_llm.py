@@ -69,7 +69,9 @@ def load_model(model_name: str, quantize: str, device: str):
     kwargs: dict = {}
     if quantize != "none":
         if device != "cuda":
-            raise SystemExit("Квантизация bitsandbytes работает только на CUDA; используйте --quantize none на CPU.")
+            raise SystemExit(
+                "Квантизация bitsandbytes работает только на CUDA; используйте --quantize none на CPU."
+            )
         from transformers import BitsAndBytesConfig
 
         kwargs["quantization_config"] = BitsAndBytesConfig(
@@ -111,7 +113,11 @@ def create_app(model_name: str, tokenizer, model, device: str, max_new_tokens_ca
         prompt_tokens = int(inputs["input_ids"].shape[1])
         max_new = min(req.max_tokens, max_new_tokens_cap)
         do_sample = req.temperature > 0
-        gen_kwargs = {"max_new_tokens": max_new, "do_sample": do_sample, "pad_token_id": tokenizer.eos_token_id}
+        gen_kwargs = {
+            "max_new_tokens": max_new,
+            "do_sample": do_sample,
+            "pad_token_id": tokenizer.eos_token_id,
+        }
         if do_sample:
             gen_kwargs.update(temperature=req.temperature, top_p=req.top_p)
         started = time.perf_counter()
@@ -125,7 +131,10 @@ def create_app(model_name: str, tokenizer, model, device: str, max_new_tokens_ca
         text = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
         completion_tokens = int(new_tokens.shape[0])
         logger.info(
-            "prompt=%d completion=%d за %.1f с", prompt_tokens, completion_tokens, time.perf_counter() - started
+            "prompt=%d completion=%d за %.1f с",
+            prompt_tokens,
+            completion_tokens,
+            time.perf_counter() - started,
         )
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
