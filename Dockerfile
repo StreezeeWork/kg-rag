@@ -37,7 +37,7 @@ ARG INSTALL_NEURAL=false
 # а после правки кода `pip install .` берёт numpy, scikit-learn и др. из кэша, не скачивая заново.
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$INSTALL_NEURAL" = "true" ]; then \
-        pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"; \
+        pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.6"; \
     fi
 
 # Сначала только то, что нужно для установки пакета (README.md указан в pyproject.toml как readme).

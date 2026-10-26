@@ -17,14 +17,22 @@ dependencies = [
     "httpx>=0.27",
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    # «Полы» безопасности для зависимостей FastAPI и uvicorn: сами они разрешают старые версии
+    # с известными уязвимостями, поэтому ограничиваем их явно (pip учтёт и эти строки):
+    #   starlette < 0.49.1 — CVE-2025-62727, DoS через заголовок Range в FileResponse (так отдаётся GET /);
+    #   h11 < 0.16         — CVE-2025-43859, request smuggling через chunked encoding.
+    "starlette>=0.49.1",
+    "h11>=0.16",
     "snowballstemmer>=2.2",
 ]
 
 [project.optional-dependencies]
 # Нейросетевые эмбеддинги и реранкер. Без них проект работает на BM25 + LSA.
+# torch < 2.6 — CVE-2025-32434 (выполнение кода через torch.load даже с weights_only=True).
+# Ту же границу повторяют Dockerfile и Makefile (torch ставится отдельно из CPU-индекса).
 neural = [
     "sentence-transformers>=3.0",
-    "torch>=2.2",
+    "torch>=2.6",
 ]
 dev = [
     "pytest>=8.0",

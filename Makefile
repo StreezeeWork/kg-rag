@@ -38,7 +38,7 @@ install: ## Установить пакет в режиме разработки
 
 # Сначала torch из CPU-индекса, иначе pip скачает с PyPI сборку с CUDA на несколько ГБ.
 install-neural: ## То же + sentence-transformers и torch (CPU) — нужно для configs/default.yaml
-	$(PYTHON) -m pip install --index-url $(TORCH_INDEX) "torch>=2.2"
+	$(PYTHON) -m pip install --index-url $(TORCH_INDEX) "torch>=2.6"
 	$(PYTHON) -m pip install -e ".[dev,neural]"
 
 # Те же две проверки, что в CI: ошибки и стиль (ruff check) + единое форматирование (ruff format --check).

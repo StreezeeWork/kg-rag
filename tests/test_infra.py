@@ -18,6 +18,7 @@ from types import ModuleType
 
 import pytest
 import yaml
+from packaging.requirements import Requirement
 
 from kbrag.config import load_config
 from kbrag.pipeline import load_calibration
@@ -141,6 +142,40 @@ def test_check_calibration_exit_codes(
 def test_lint_checks_formatting_locally_and_in_ci() -> None:
     assert "ruff format --check" in make_recipe("lint")
     assert "ruff format --check" in (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+
+# --- Зависимости: нижние границы не пускают версии с известными уязвимостями ----------------------
+
+
+def declared_requirements() -> dict[str, Requirement]:
+    tomllib = pytest.importorskip("tomllib")  # есть в стандартной библиотеке с Python 3.11
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    lines = project["dependencies"] + [
+        r for extra in project["optional-dependencies"].values() for r in extra
+    ]
+    return {req.name: req for req in map(Requirement, lines)}
+
+
+@pytest.mark.parametrize(
+    ("package", "vulnerable", "fixed"),
+    [
+        ("starlette", "0.49.0", "0.49.1"),  # CVE-2025-62727
+        ("h11", "0.15.0", "0.16.0"),  # CVE-2025-43859
+        ("torch", "2.5.1", "2.6.0"),  # CVE-2025-32434
+    ],
+)
+def test_dependency_floors_exclude_vulnerable_versions(package: str, vulnerable: str, fixed: str) -> None:
+    spec = declared_requirements()[package].specifier
+    assert not spec.contains(vulnerable)
+    assert spec.contains(fixed)
+
+
+def test_torch_floor_is_the_same_everywhere() -> None:
+    # torch ставится отдельной командой (CPU-индекс) в Dockerfile и Makefile — граница не должна разъехаться.
+    expected = str(declared_requirements()["torch"].specifier)
+    for name in ("Dockerfile", "Makefile"):
+        floors = re.findall(r'"torch(>=[\d.]+)"', (ROOT / name).read_text(encoding="utf-8"))
+        assert floors and set(floors) == {expected}, f"{name}: {floors}, ожидалось {expected}"
 
 
 # --- Docker и секреты: что попадает в git и в образ, кому открыт порт ------------------------------

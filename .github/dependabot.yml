@@ -1,0 +1,19 @@
+# Dependabot раз в неделю ищет новые версии и открывает PR с обновлением; CI на PR проверяет, что всё работает.
+#
+# Что обновляется здесь:
+#   * github-actions — actions в .github/workflows закреплены тегами (actions/checkout@v4 и т. п.);
+#   * docker         — базовый образ в Dockerfile (python:3.12-slim).
+# Python-пакеты: в pyproject.toml заданы только нижние границы, свежие версии pip берёт сам.
+# Об уязвимостях в них сообщают Dependabot alerts (Settings → Code security → Dependabot alerts):
+# GitHub читает зависимости из pyproject.toml без этого файла.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
