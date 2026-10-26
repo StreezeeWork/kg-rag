@@ -6,6 +6,7 @@ dev = t-002, t-004; test = t-001, t-003, t-005 (t-005 — неотвечаемы
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -162,6 +163,48 @@ def test_one_index_per_experiment(
 # ---------------------------------------------------------------------------
 # Метрики
 # ---------------------------------------------------------------------------
+
+
+def test_confusable_answer_citing_archived_version_is_flagged(
+    gold: list[GoldItem], mini_docs: list[Document]
+) -> None:
+    # Регрессия: ответ на confusable-вопрос t-003 смешивает архивную редакцию («не более 2 дней»)
+    # с действующей («до 3 дней»), а Recall@5 и fact_recall ставили 1.0 без всякого сигнала.
+    result = run_experiment(make_cfg(), gold=gold, docs=mini_docs)
+    rows = rows_by_qid(result)
+
+    assert rows["t-003"]["fact_recall"] == 1.0 and rows["t-003"]["recall@5"] == 1.0
+    assert rows["t-003"]["stale_citation_rate"] == 1.0
+    assert rows["t-001"]["stale_citation_rate"] == 0.0
+    assert rows["t-005"]["stale_citation_rate"] is None  # неотвечаемый вопрос
+    assert result.metrics["by_type"]["confusable"]["stale_citation_rate"] == 1.0
+
+
+def test_answer_without_citations_gets_zero_citation_precision(
+    gold: list[GoldItem], mini_docs: list[Document], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Регрессия: ответ без ссылок давал None и выпадал из среднего — CitationPrecision
+    # системы, которая не ставит ссылок, выглядел бы лучше, чем у ставящей их неточно.
+    original = RAGPipeline.answer_with_contexts
+
+    def without_citations(self, *args, **kwargs):
+        answer = original(self, *args, **kwargs)
+        return dataclasses.replace(answer, citations=[])
+
+    monkeypatch.setattr(RAGPipeline, "answer_with_contexts", without_citations)
+    rows = rows_by_qid(run_experiment(make_cfg(), gold=gold, docs=mini_docs))
+
+    assert rows["t-001"]["citation_precision"] == 0.0
+    assert rows["t-005"]["citation_precision"] is None  # у неотвечаемого вопроса нет доказательств
+
+
+def test_counts_answerable_and_records_score_source(gold: list[GoldItem], mini_docs: list[Document]) -> None:
+    result = run_experiment(make_cfg(), gold=gold, docs=mini_docs)
+    # Знаменатель метрик поиска (отвечаемые) отличается от N: в test 3 вопроса, из них 2 отвечаемых.
+    assert result.metrics["test"]["n_questions"] == 3 and result.metrics["test"]["n_answerable"] == 2
+    assert result.score_source == "bm25"  # шкала порога: BM25-score и косинус несравнимы
+    hybrid = run_experiment(make_cfg(retrieval={"mode": "hybrid"}), gold=gold, docs=mini_docs)
+    assert hybrid.score_source == "dense"
 
 
 def test_retrieval_metrics_only_over_answerable(gold: list[GoldItem], mini_docs: list[Document]) -> None:

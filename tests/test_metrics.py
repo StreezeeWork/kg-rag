@@ -13,6 +13,7 @@ from kbrag.eval.metrics import (
     choose_threshold,
     citation_precision,
     citation_recall,
+    cites_stale_document,
     coverage_matrix,
     fact_recall,
     hit_at_k,
@@ -311,6 +312,18 @@ def test_citation_precision_and_recall() -> None:
     full = [_citation(1, C_E1), _citation(2, C_E2)]
     assert citation_precision(full, CHUNKS_BY_ID, [E1, E2]) == 1.0
     assert citation_recall(full, CHUNKS_BY_ID, [E1, E2]) == 1.0
+
+
+def test_cites_stale_document() -> None:
+    old = Chunk(chunk_id="old::0", doc_id="old", text="x", start=0, end=1, metadata={"status": "archived"})
+    new = Chunk(chunk_id="new::0", doc_id="new", text="x", start=0, end=1, metadata={"status": "active"})
+    chunks = {c.chunk_id: c for c in (old, new)}
+    cite_old, cite_new = _citation(1, old), _citation(2, new)
+
+    assert cites_stale_document([cite_new, cite_old], chunks, {"new"})  # архив вне эталона — ошибка
+    assert not cites_stale_document([cite_new], chunks, {"new"})
+    assert not cites_stale_document([cite_old], chunks, {"old"})  # вопрос про старую редакцию — ок
+    assert not cites_stale_document([], chunks, {"new"})
 
 
 def test_citation_metrics_edge_cases() -> None:

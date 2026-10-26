@@ -46,6 +46,7 @@ from kbrag.eval.metrics import (
     choose_threshold,
     citation_precision,
     citation_recall,
+    cites_stale_document,
     fact_recall,
     mean_ignore_none,
     percentile,
@@ -139,6 +140,7 @@ def run_experiment(
         per_question=per_question,
         threshold=threshold,
         index_stats=dict(pipeline.index_stats),
+        score_source=pipeline.score_source,
     )
 
 
@@ -236,8 +238,17 @@ def _score_question(
         scores["fact_recall"] = 0.0 if abstained and facts is not None else facts
         scores["fact_recall_answered"] = None if abstained else facts
         scores["token_f1"] = 0.0 if abstained else token_f1(text, item.answer)
-        scores["citation_precision"] = citation_precision(citations, pipeline.chunks_by_id, spans)
+        precision = citation_precision(citations, pipeline.chunks_by_id, spans)
+        # Ответ без единой ссылки — не «неприменимо», а ноль: иначе такой ответ (обычное дело
+        # для LLM) выпадал бы из среднего и завышал CitationPrecision. Отказ остаётся None.
+        if precision is None and not abstained:
+            precision = 0.0
+        scores["citation_precision"] = precision
         scores["citation_recall"] = citation_recall(citations, pipeline.chunks_by_id, spans)
+        if not abstained:
+            evidence_docs = {evidence.doc_id for evidence in item.evidence}
+            stale = cites_stale_document(citations, pipeline.chunks_by_id, evidence_docs)
+            scores["stale_citation_rate"] = float(stale)
     n_markers = len(citations) + n_invalid
     scores["invalid_citation_rate"] = n_invalid / n_markers if n_markers else None
 
@@ -280,6 +291,8 @@ def aggregate_metrics(rows: Sequence[dict[str, Any]], k_values: Sequence[int]) -
             result[name] = _round_ms(percentile(latencies, 50))
         elif name == "latency_p95_ms":
             result[name] = _round_ms(percentile(latencies, 95))
+        elif name == "n_answerable":
+            result[name] = sum(1 for row in rows if row["type"] != "unanswerable")
         elif name == "n_questions":
             result[name] = len(rows)
     return result

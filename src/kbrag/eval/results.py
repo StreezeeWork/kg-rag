@@ -32,6 +32,10 @@ GENERATION_METRICS = (
     "citation_precision",
     "citation_recall",
     "invalid_citation_rate",
+    # Доля отвеченных вопросов, где ответ ссылается на архивную (устаревшую) редакцию
+    # документа, которой нет в эталоне. Главное для типа confusable: Recall@5 там 1.0,
+    # даже если ответ смешивает действующую и старую цифру.
+    "stale_citation_rate",
 )
 ABSTENTION_METRICS = ("abstain_precision", "abstain_recall", "abstain_f1", "false_abstention_rate")
 LATENCY_METRICS = ("latency_p50_ms", "latency_p95_ms")
@@ -67,6 +71,7 @@ def metric_names(k_values: Sequence[int] = DEFAULT_K_VALUES) -> list[str]:
         *GENERATION_METRICS,
         *ABSTENTION_METRICS,
         *LATENCY_METRICS,
+        "n_answerable",  # из них отвечаемых: знаменатель метрик поиска
         "n_questions",
     ]
 
@@ -78,6 +83,9 @@ class ExperimentResult:
     ``skipped`` — причина, по которой эксперимент не запускался (например, не установлены
     нейросетевые зависимости). Такой результат попадает в отчёт отдельным списком,
     чтобы было видно, что эксперимент не забыт, а пропущен осознанно.
+
+    ``score_source`` — шкала уверенности, к которой относится ``threshold``
+    (``rerank`` / ``dense`` / ``bm25``): порог 20.5 по BM25 и 0.5 по косинусу несравнимы.
     """
 
     name: str
@@ -87,6 +95,7 @@ class ExperimentResult:
     threshold: float | None
     index_stats: dict
     skipped: str | None = None
+    score_source: str | None = None
 
     @property
     def is_skipped(self) -> bool:
@@ -113,6 +122,7 @@ class ExperimentResult:
             threshold=data.get("threshold"),
             index_stats=dict(data.get("index_stats") or {}),
             skipped=data.get("skipped"),
+            score_source=data.get("score_source"),
         )
 
     @classmethod

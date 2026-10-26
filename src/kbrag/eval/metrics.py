@@ -19,7 +19,7 @@ import itertools
 import math
 import re
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 from kbrag.eval.dataset import Span, is_relevant
 from kbrag.text import STOPWORDS, stem, tokenize
@@ -302,6 +302,33 @@ def citation_precision(
         if chunk is not None and any(is_relevant(chunk, span, min_coverage) for span in spans):
             relevant += 1
     return relevant / len(cited_ids)
+
+
+ARCHIVED_STATUS = "archived"  # значение поля status в шапке документа (см. data/DATASET.md)
+
+
+def cites_stale_document(
+    citations: Sequence[Citation],
+    chunks_by_id: Mapping[str, Chunk],
+    evidence_doc_ids: Collection[str],
+) -> bool:
+    """Ссылается ли ответ на архивную редакцию документа, которой нет среди доказательств.
+
+    Зачем: вопросы типа confusable проверяют, что система не путает действующий документ
+    с устаревшей версией. Recall@k такую путаницу не видит (нужный документ найден — и ладно),
+    а fact_recall считает только полноту: ответ «14 символов [1] … 8 символов [2]» получает 1.0.
+    Если же архивный документ сам указан в эталоне (вопрос про старую редакцию), ссылка на него
+    — не ошибка.
+    """
+    for chunk_id in _unique_chunk_ids(citations):
+        chunk = chunks_by_id.get(chunk_id)
+        if (
+            chunk is not None
+            and chunk.metadata.get("status") == ARCHIVED_STATUS
+            and chunk.doc_id not in evidence_doc_ids
+        ):
+            return True
+    return False
 
 
 def citation_recall(
