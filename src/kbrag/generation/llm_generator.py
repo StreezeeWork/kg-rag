@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+
 from kbrag.generation.base import GenerationResult, Generator
 from kbrag.generation.llm import OpenAICompatibleClient
 from kbrag.generation.prompts import ABSTAIN_TEXT, build_messages, is_abstention
 from kbrag.types import ScoredChunk
+
+logger = logging.getLogger(__name__)
+
+# Модель упёрлась в max_tokens и оборвала ответ на полуслове: пользователь должен это видеть.
+ANSWER_TRUNCATED_FLAG = "answer_truncated"
 
 
 class LLMGenerator(Generator):
@@ -38,9 +45,16 @@ class LLMGenerator(Generator):
         messages = build_messages(question, contexts, max_chars=self.max_context_chars)
         response = self.client.chat(messages, temperature=self.temperature, max_tokens=self.max_tokens)
         text = response.text.strip()
+        flags = []
+        if response.finish_reason == "length":
+            logger.warning(
+                "Ответ LLM обрезан по max_tokens=%d: увеличьте generation.max_tokens", self.max_tokens
+            )
+            flags.append(ANSWER_TRUNCATED_FLAG)
         return GenerationResult(
             text=text,
             abstained=is_abstention(text),
             usage=dict(response.usage),
             raw=response.text,
+            flags=flags,
         )

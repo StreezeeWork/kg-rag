@@ -345,6 +345,7 @@ class RAGPipeline:
         gen_started = time.perf_counter()
         result = self.generator.generate(question, prompt_contexts)
         timings["generate_ms"] = _elapsed_ms(gen_started)
+        flags.extend(result.flags)
         if result.abstained:
             # Отказ генератора выглядит так же, как отказ по порогу: фиксированная фраза и никаких
             # ссылок. Иначе «К сожалению, в базе знаний нет ответа… [1]» показал бы ссылку на

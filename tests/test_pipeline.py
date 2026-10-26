@@ -364,6 +364,18 @@ def test_generator_abstention_is_returned_as_fixed_phrase_without_citations(
     assert LOW_CONFIDENCE_FLAG not in answer.flags
 
 
+def test_generator_flags_are_added_to_answer_flags(tmp_path: Path, mini_docs: list[Document]) -> None:
+    class TruncatingGenerator(Generator):
+        name = "truncating"
+
+        def generate(self, question: str, contexts: list[ScoredChunk]) -> GenerationResult:
+            return GenerationResult(text="Отпуск длится [1]", abstained=False, flags=["answer_truncated"])
+
+    pipeline = build_pipeline(make_cfg(tmp_path), mini_docs, generator=TruncatingGenerator())
+
+    assert "answer_truncated" in pipeline.answer(VACATION_Q).flags
+
+
 # ---------------------------------------------------------------------------
 # Guardrails
 # ---------------------------------------------------------------------------

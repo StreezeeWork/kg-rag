@@ -14,8 +14,8 @@ from kbrag.generation.llm import LLMError, LLMResponse, OpenAICompatibleClient
 BASE_URL = "http://llm.test/v1"
 MESSAGES = [{"role": "system", "content": "Правила"}, {"role": "user", "content": "Вопрос?"}]
 
-# Элемент сценария: готовый ответ сервера или имя сетевой ошибки, которую надо «выбросить».
-Step = httpx.Response | str
+# Элемент сценария: готовый ответ сервера, имя сетевой ошибки или само исключение, которое надо «выбросить».
+Step = httpx.Response | str | Exception
 
 
 def ok_response(content: str = "Отпуск — 28 календарных дней [1].", **extra: object) -> httpx.Response:
@@ -43,6 +43,8 @@ class Server:
             raise httpx.ReadTimeout("read timed out", request=request)
         if step == "connect_error":
             raise httpx.ConnectError("connection refused", request=request)
+        if isinstance(step, Exception):
+            raise step
         assert isinstance(step, httpx.Response)
         # Свежая копия: один и тот же объект Response нельзя безопасно отдавать несколько раз.
         return httpx.Response(step.status_code, headers=step.headers, content=step.content)
@@ -219,8 +221,12 @@ def test_negative_max_retries_is_rejected() -> None:
 def test_from_generation_config_reads_key_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MY_LLM_KEY", "from-env")
     cfg = GenerationConfig(
-        backend="openai", base_url="http://gpu:8000/v1/", model="qwen", api_key_env="MY_LLM_KEY",
-        timeout_s=12.5, max_retries=5,
+        backend="openai",
+        base_url="http://gpu:8000/v1/",
+        model="qwen",
+        api_key_env="MY_LLM_KEY",
+        timeout_s=12.5,
+        max_retries=5,
     )
 
     client = OpenAICompatibleClient.from_config(cfg)
@@ -241,3 +247,108 @@ def test_from_judge_config_without_key_in_environment(monkeypatch: pytest.Monkey
         assert client.api_key is None
         assert client.model == "judge-model"
         assert client.max_retries == 3  # у JudgeConfig нет своего значения
+
+
+# --- Неисправимые ошибки, пустой и обрезанный ответ, общий лимит времени -----------------------
+
+
+@pytest.mark.parametrize("base_url", ["localhost:8000/v1", "ftp://llm.test/v1", ""])
+def test_base_url_without_http_scheme_is_rejected_at_once(base_url: str) -> None:
+    # Раньше опечатка давала 4 попытки, 3.5 с ожидания и сбивающее с толку «сетевая ошибка».
+    with pytest.raises(ValueError, match="http"):
+        OpenAICompatibleClient(base_url, "m")
+
+
+@pytest.mark.parametrize("timeout_s", [0, -1.0])
+def test_non_positive_timeout_is_rejected(timeout_s: float) -> None:
+    with pytest.raises(ValueError):
+        OpenAICompatibleClient(BASE_URL, "m", timeout_s=timeout_s)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.UnsupportedProtocol("Request URL has an unsupported protocol"),
+        httpx.ProxyError("proxy refused"),
+        httpx.LocalProtocolError("bad request line"),
+    ],
+)
+def test_unrecoverable_transport_errors_are_not_retried(error: Exception) -> None:
+    server = Server([error])
+    sleeps: list[float] = []
+
+    with pytest.raises(LLMError, match="Не удалось отправить запрос"):
+        make_client(server, sleeps).chat(MESSAGES)
+
+    assert len(server.requests) == 1
+    assert sleeps == []
+
+
+def test_network_errors_and_server_disconnects_are_retried() -> None:
+    server = Server([httpx.ReadError("reset"), httpx.RemoteProtocolError("closed"), ok_response()])
+    sleeps: list[float] = []
+    assert make_client(server, sleeps).chat(MESSAGES).text
+    assert sleeps == [0.5, 1.0]
+
+
+@pytest.mark.parametrize("content", ["", "   \n"])
+def test_empty_content_is_an_error_not_an_answer(content: str) -> None:
+    server = Server([ok_response(content)])
+    with pytest.raises(LLMError, match="пустой ответ"):
+        make_client(server, []).chat(MESSAGES)
+    assert len(server.requests) == 1  # пустой ответ — не сетевой сбой, повторять незачем
+
+
+def test_finish_reason_is_parsed() -> None:
+    truncated = httpx.Response(
+        200, json={"choices": [{"message": {"content": "Отпуск длится"}, "finish_reason": "length"}]}
+    )
+    server = Server([truncated, ok_response()])
+    client = make_client(server, [])
+
+    assert client.chat(MESSAGES).finish_reason == "length"
+    assert client.chat(MESSAGES).finish_reason is None  # сервер поле не прислал
+
+
+def test_retry_after_header_is_respected() -> None:
+    server = Server([httpx.Response(429, headers={"Retry-After": "3"}, text="slow down"), ok_response()])
+    sleeps: list[float] = []
+
+    make_client(server, sleeps).chat(MESSAGES)
+
+    assert sleeps == [3.0]  # не 0.5 из собственного backoff: сервер попросил подождать дольше
+
+
+def test_retry_after_beyond_total_limit_fails_fast() -> None:
+    server = Server([httpx.Response(429, headers={"Retry-After": "120"}, text="slow down")])
+    sleeps: list[float] = []
+
+    with pytest.raises(LLMError, match="общий лимит"):
+        make_client(server, sleeps, timeout_s=10.0).chat(MESSAGES)
+
+    assert len(server.requests) == 1 and sleeps == []
+
+
+def test_retries_stop_when_backoff_does_not_fit_into_total_limit() -> None:
+    server = Server([httpx.Response(503, text="busy")])
+    sleeps: list[float] = []
+
+    with pytest.raises(LLMError, match="общий лимит 0.3 с"):
+        make_client(server, sleeps, timeout_s=0.3).chat(MESSAGES)
+
+    assert len(server.requests) == 1  # пауза 0.5 с уже не влезает в 0.3 с
+    assert sleeps == []
+
+
+def test_each_attempt_gets_at_most_the_remaining_time() -> None:
+    seen_timeouts: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_timeouts.append(request.extensions["timeout"])
+        return ok_response()
+
+    client = OpenAICompatibleClient(BASE_URL, "m", timeout_s=7.0, transport=httpx.MockTransport(handler))
+    client.chat(MESSAGES)
+
+    (timeouts,) = seen_timeouts
+    assert 0 < timeouts["read"] <= 7.0 and 0 < timeouts["connect"] <= 7.0

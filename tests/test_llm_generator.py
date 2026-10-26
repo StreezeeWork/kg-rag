@@ -29,8 +29,13 @@ def make_context(docs: list[Document], doc_id: str, needle: str) -> ScoredChunk:
     for i, match in enumerate(_PARAGRAPH_RE.finditer(doc.text)):
         if needle in match.group():
             chunk = Chunk(
-                chunk_id=f"{doc_id}::{i:03d}", doc_id=doc_id, text=match.group(),
-                start=match.start(), end=match.end(), title=doc.title, metadata=dict(doc.metadata),
+                chunk_id=f"{doc_id}::{i:03d}",
+                doc_id=doc_id,
+                text=match.group(),
+                start=match.start(),
+                end=match.end(),
+                title=doc.title,
+                metadata=dict(doc.metadata),
             )
             return ScoredChunk(chunk=chunk, score=1.0, source="bm25")
     raise AssertionError(f"абзац с {needle!r} не найден в {doc_id}")
@@ -39,16 +44,28 @@ def make_context(docs: list[Document], doc_id: str, needle: str) -> ScoredChunk:
 class FakeClient:
     """Подменяет OpenAICompatibleClient: возвращает заготовленный текст и запоминает вызовы."""
 
-    def __init__(self, reply: str = "Отпуск длится 28 календарных дней [1].", error: Exception | None = None):
+    def __init__(
+        self,
+        reply: str = "Отпуск длится 28 календарных дней [1].",
+        error: Exception | None = None,
+        finish_reason: str | None = "stop",
+    ):
         self.reply = reply
         self.error = error
+        self.finish_reason = finish_reason
         self.calls: list[dict] = []
 
     def chat(self, messages, temperature=0.0, max_tokens=512, response_format=None) -> LLMResponse:
         self.calls.append({"messages": messages, "temperature": temperature, "max_tokens": max_tokens})
         if self.error is not None:
             raise self.error
-        return LLMResponse(text=self.reply, usage={"prompt_tokens": 50, "completion_tokens": 9}, latency_ms=12.0, model="fake")
+        return LLMResponse(
+            text=self.reply,
+            usage={"prompt_tokens": 50, "completion_tokens": 9},
+            latency_ms=12.0,
+            model="fake",
+            finish_reason=self.finish_reason,
+        )
 
 
 @pytest.fixture()
@@ -97,6 +114,18 @@ def test_abstention_is_recognized(contexts: list[ScoredChunk], reply: str) -> No
     assert result.abstained
 
 
+def test_answer_cut_by_max_tokens_is_flagged(contexts: list[ScoredChunk]) -> None:
+    client = FakeClient(
+        reply="Отпуск длится 28 календарных дней [1], а переносится по заявлению в", finish_reason="length"
+    )
+
+    result = LLMGenerator(client, max_tokens=16).generate("Сколько длится отпуск?", contexts)
+
+    assert result.flags == ["answer_truncated"]
+    assert not result.abstained
+    assert LLMGenerator(FakeClient()).generate("Сколько длится отпуск?", contexts).flags == []
+
+
 def test_similar_but_different_answer_is_not_abstention(contexts: list[ScoredChunk]) -> None:
     result = LLMGenerator(FakeClient(reply="В базе знаний есть ответ: 28 дней [1].")).generate("?", contexts)
     assert not result.abstained
@@ -139,8 +168,13 @@ def test_make_generator_extractive() -> None:
 def test_make_generator_openai(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KBRAG_TEST_KEY", "k-123")
     cfg = GenerationConfig(
-        backend="openai", base_url="http://gpu:8000/v1", model="qwen", api_key_env="KBRAG_TEST_KEY",
-        temperature=0.1, max_tokens=256, max_context_chars=3000,
+        backend="openai",
+        base_url="http://gpu:8000/v1",
+        model="qwen",
+        api_key_env="KBRAG_TEST_KEY",
+        temperature=0.1,
+        max_tokens=256,
+        max_context_chars=3000,
     )
 
     generator = make_generator(cfg)
