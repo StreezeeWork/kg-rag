@@ -4753,6 +4753,7 @@ for s in [
 from kbrag.eval.dataset import is_relevant
 from kbrag.types import Chunk
 
+
 def test_is_relevant_boundary_is_half_of_the_shorter_span() -> None:
     chunk = Chunk("d::000", "d", "x" * 100, 0, 100)
     assert is_relevant(chunk, ("d", 50, 150))  # пересечение 50 из 100 — ровно половина
@@ -4842,12 +4843,14 @@ from kbrag.eval import load_results
 
 res = {r.name: r for r in load_results("reports/my_bm25_vs_lsa")}
 
+
 def by_qid(name, split="dev"):  # split: "dev", "test" или "all"
     return {
         row["qid"]: row
         for row in res[name].per_question
         if (split == "all" or row["split"] == split) and row["recall@5"] is not None
     }
+
 
 bm25, lsa = by_qid("bm25_recursive"), by_qid("lsa_dense")
 for qid in sorted(bm25):
