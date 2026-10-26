@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -30,6 +31,14 @@ GOLD_PATH = ROOT / "data" / "eval" / "gold.jsonl"
 # Сколько общих стемов вопроса paraphrase с цитатой-доказательством ещё допустимо.
 # Служебные совпадения («один», «каждый») неизбежны, а три и больше — уже подсказка поиску.
 MAX_PARAPHRASE_QUOTE_OVERLAP = 2
+
+# Действующий документ → его архивная редакция («двойник» с другими значениями).
+# Новый архивный документ нужно добавить сюда: тест ниже это проверяет.
+ARCHIVED_TWINS = {
+    "hr-remote-2025": "hr-remote-2023",
+    "it-passwords": "it-passwords-2023",
+    "eng-release-process": "eng-release-process-2023",
+}
 
 
 @pytest.fixture(scope="module")
@@ -60,6 +69,11 @@ def _facts_found_in(doc: Document, facts: Iterable[str]) -> set[str]:
     """
     sentences = _sentences(doc)
     return {fact for fact in facts if any(fact_recall(s, [fact]) == 1.0 for s in sentences)}
+
+
+def _sections(doc: Document) -> list[str]:
+    """Разделы документа по заголовкам ``##``: примерно столько текста видит генератор во фрагменте."""
+    return [part for part in re.split(r"(?m)^(?=## )", doc.text) if part.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +137,80 @@ def test_paraphrase_questions_do_not_copy_the_quote(items: list[GoldItem]) -> No
 
 
 # ---------------------------------------------------------------------------
+# Ключевые факты отличают верный ответ от неверного
+# ---------------------------------------------------------------------------
+
+
+def test_no_key_fact_is_answered_by_the_question_itself(items: list[GoldItem]) -> None:
+    """Факт, все стемы которого есть в вопросе, засчитывается ответу-повтору вопроса.
+
+    Так было у it-004 («ВНЕШНИЙ» при вопросе «…с внешних адресов»), hr-018 и it-037:
+    FactRecall получал баллы за пересказ вопроса, а не за ответ.
+    """
+    offenders = [
+        (item.qid, fact)
+        for item in items
+        for fact in item.key_facts
+        if fact_recall(item.question, [fact]) == 1.0
+    ]
+    assert offenders == []
+
+
+def test_every_archived_document_has_a_registered_twin(docs: dict[str, Document]) -> None:
+    archived = sorted(doc_id for doc_id, doc in docs.items() if doc.metadata.get("status") == "archived")
+    assert archived == sorted(ARCHIVED_TWINS.values())
+
+
+def test_confusable_key_facts_reject_an_answer_from_the_archive(
+    items: list[GoldItem], docs: dict[str, Document]
+) -> None:
+    """confusable проверяет, не перепутала ли система действующую норму с архивной.
+
+    Значит, ответ, собранный из любого раздела архивного двойника, не должен набирать
+    FactRecall = 1. Раньше так «проходили» it-037 (архивное «допускаются SMS-коды» содержит
+    те же стемы, что «SMS-коды … не допускаются»: «не» — стоп-слово) и hr-009
+    («до 3 дней» совпадало с архивным «за 3 рабочих дня»).
+    """
+    offenders: dict[str, str] = {}
+    for item in items:
+        if item.qtype != "confusable":
+            continue
+        for doc_id in {ev.doc_id for ev in item.evidence} & ARCHIVED_TWINS.keys():
+            for section in _sections(docs[ARCHIVED_TWINS[doc_id]]):
+                if fact_recall(section, item.key_facts) == 1.0:
+                    offenders[item.qid] = section.splitlines()[0]
+    assert offenders == {}
+
+
+# (qid, факт, который должен быть среди key_facts, факт, которого там быть не должно).
+# Каждая строка — исправленный «слабый» факт; без него метрика снова начнёт ошибаться.
+KEY_FACT_FIXES = [
+    # Главное для сотрудника — отпуск продлевается; без этого факта неполный ответ получал 1.0.
+    pytest.param("hr-008", "отпуск продлевается", None, id="hr-008-main-fact"),
+    # «Обучение» засчитывалось любому ответу со словом «обучение», даже про другую процедуру.
+    pytest.param("hr-026", "счёт провайдера", "Обучение", id="hr-026-generic-word"),
+    # Одно общее слово «запрещено» (19 из 48 документов) пропускало ответ из чужого документа.
+    pytest.param("eng-018", "Наказание", None, id="eng-018-single-common-word"),
+    # Факт не может быть одной из альтернатив «А или Б»: верный ответ «звоните 1111» терял балл.
+    # Кроме того, при утечке регламент ИБ разрешает только звонок.
+    pytest.param("eng-028", "1111", "security@nimbus.example", id="eng-028-or-alternative"),
+    # «автоматически» есть в 24 документах; факт должен быть про VPN, а не про что угодно.
+    pytest.param("x-003", "открывается автоматически", "автоматически", id="x-003-generic-word"),
+]
+
+
+@pytest.mark.parametrize(("qid", "required", "forbidden"), KEY_FACT_FIXES)
+def test_key_fact_fix_is_in_place(
+    by_qid: dict[str, GoldItem], qid: str, required: str | None, forbidden: str | None
+) -> None:
+    facts = by_qid[qid].key_facts
+    if required is not None:
+        assert required in facts
+    if forbidden is not None:
+        assert forbidden not in facts
+
+
+# ---------------------------------------------------------------------------
 # Непротиворечивость мира: «каждый факт живёт ровно в одном документе»
 # ---------------------------------------------------------------------------
 
@@ -134,6 +222,14 @@ WORLD_RULES = [
     pytest.param("eng-ci-cd", "доступен только релиз-менеджеру", False, id="deploy-owner-only-in-release"),
     # Шестой этап (deploy-staging) идёт после слияния в main, а не в пайплайне merge request.
     pytest.param("eng-ci-cd", "Пайплайн merge request состоит из шести", False, id="ci-six-stages"),
+    # При утечке секрета регламент ИБ требует звонить на 1111; почта «в рабочее время, если не
+    # срочно» — неверный совет для утечки, а «или» делало каналы равноценными.
+    pytest.param(
+        "eng-secrets",
+        "security@nimbus.example или по внутреннему номеру 1111",
+        False,
+        id="secret-leak-channel",
+    ),
 ]
 
 
