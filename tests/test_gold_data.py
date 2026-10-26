@@ -230,6 +230,35 @@ WORLD_RULES = [
         False,
         id="secret-leak-channel",
     ),
+    # Решение об откате принимает релиз-менеджер («Релизный процесс»); IC только запрашивает
+    # откат. Иначе у confusable-вопроса eng-009 два «действующих» ответа.
+    pytest.param("eng-incident-severity", "принимает решения об откате", False, id="rollback-decision-owner"),
+    # VPN обязателен в командировке, но геофильтр открывался только для «Работы из-за рубежа»,
+    # а политика удалённой работы командировки не покрывает: в зарубежной командировке VPN не работал.
+    pytest.param(
+        "it-vpn", "На время зарубежной командировки доступ из-за рубежа", True, id="vpn-trip-abroad"
+    ),
+    # Всем сотрудникам нужна «Казна» (командировки, авансовые отчёты), но в базовом наборе её не было.
+    pytest.param("it-access-requests", "роль «Сотрудник» в «Казне»", True, id="kazna-in-base-access"),
+    # Права локального администратора (8 часов, «Установка ПО») ≠ права администратора системы (CISO).
+    pytest.param(
+        "it-access-requests", "к правам администратора системы не относятся", True, id="local-admin"
+    ),
+    # Подрядчикам почтовый ящик не выдаётся («Работа с подрядчиками»).
+    pytest.param("it-passwords", "подрядчикам почтовый ящик не выдаётся", True, id="contractor-mail"),
+    # «NDA и коммерческая тайна» требует подтвердить уничтожение носителей в обходном листе.
+    pytest.param("hr-offboarding", "носители с конфиденциальной информацией", True, id="media-in-clearance"),
+    # Пороги закупок не пересекаются: ровно 100 000 рублей — первый уровень.
+    pytest.param(
+        "fin-procurement", "до 100 000 рублей с НДС включительно", True, id="procurement-lower-tier"
+    ),
+    pytest.param("fin-procurement", "Закупки от 100 000", False, id="procurement-no-overlap"),
+    # Срок заявки на ночную работу в будний день раньше не был определён.
+    pytest.param("fin-office-access", "Для работы ночью в будний день", True, id="weekday-night-access"),
+    # Этап «оценка руководителя и калибровка (2 недели)» противоречил калибровке «в течение 2 недель после».
+    pytest.param("hr-performance-review", "калибровка (2 недели)", False, id="calibration-timing"),
+    # «Офисный 0–1» и «Гибридный до 3» пересекались: 1 удалённый день попадал в оба формата.
+    pytest.param("hr-remote-2025", "| Гибридный | до 3 |", False, id="hybrid-format-range"),
 ]
 
 
@@ -237,3 +266,17 @@ WORLD_RULES = [
 def test_world_rule(docs: dict[str, Document], doc_id: str, fragment: str, present: bool) -> None:
     text = " ".join(docs[doc_id].text.split())  # переносы строк внутри абзаца не важны
     assert (fragment in text) is present
+
+
+def test_onboarding_signs_nda_before_first_login(docs: dict[str, Document]) -> None:
+    """«NDA и коммерческая тайна»: без подписанного NDA доступ к системам не предоставляется.
+
+    Значит, в первый день сначала подписание, потом вход. Раньше онбординг выдавал ноутбук
+    и учётную запись до подписания договора — прямое противоречие внутри мира.
+    """
+    assert (
+        "без подписанного обязательства доступ к информационным системам не предоставляется"
+        in docs["fin-nda"].text
+    )
+    onboarding = docs["hr-onboarding"].text
+    assert onboarding.index("обязательства о неразглашении") < onboarding.index("впервые войти")
