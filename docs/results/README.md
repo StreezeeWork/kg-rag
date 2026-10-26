@@ -1,18 +1,28 @@
 # Эталонные результаты сетки экспериментов
 
-Здесь лежат копии `leaderboard.md` сетки экспериментов, на которые ссылается корневой README.
+Здесь лежат таблицы сетки экспериментов, на которые ссылаются README и ONBOARDING.
 Каталог `reports/` в git не попадает (это черновики прогонов), поэтому опорные цифры хранятся отдельно.
 
-| Файл | Что внутри | Как получен |
-|---|---|---|
-| [grid_offline.md](grid_offline.md) | офлайн-лесенка: BM25 (окна → разделы → заголовки → составные токены), LSA, гибриды | `kbrag grid --only bm25_fixed bm25_recursive_noheader bm25_recursive bm25_recursive_split_mixed lsa_dense hybrid_bm25_lsa hybrid_bm25_lsa_weighted --out reports/grid_offline` |
-| [grid_neural.md](grid_neural.md) | вся сетка без тяжёлых моделей: офлайн-шаги + e5, гибрид с e5, реранкер, размер фрагмента | `kbrag grid --out reports/grid_baseline` (нужен `make install-neural`) |
+| Файл | Что внутри |
+|---|---|
+| [grid_offline.md](grid_offline.md) | офлайн-лесенка: BM25 (окна → разделы → заголовки → составные токены), LSA, гибриды |
+| [grid_neural.md](grid_neural.md) | вся сетка без тяжёлых моделей: офлайн-шаги + e5, гибрид с e5, реранкер, размер фрагмента |
+
+Как получены (нужен `make install-neural`; на CPU сетка считается около получаса):
+
+```bash
+kbrag grid --out reports/grid_final
+python scripts/export_reference_results.py reports/grid_final docs/results
+```
+
+Скрипт строит обе таблицы из одного прогона: офлайн-таблица — подмножество полной, поэтому цифры в них
+совпадают строка в строку, — и убирает столбцы задержки (почему — ниже).
 
 Условия прогона: эталон из 237 вопросов (test: 131 отвечаемый + 35 неотвечаемых), корпус из 48 документов
 (`corpus_sha256` be5fe72bcb47f3a6, `gold_sha256` f2c54f0f3e8a96ef — те же хэши стоят в `provenance` каждого
 эксперимента в `results.json`), модели e5 и реранкера — те же снапшоты, что закреплены в `configs/default.yaml`
-(в `experiments.yaml` ревизия не задана, в кэше лежала ровно эта), CPU, Windows 11,
-Python 3.12, код коммита 1ac846b (`environment.git_sha` в `results.json`).
+(в `experiments.yaml` ревизия не задана, в кэше лежала ровно эта), CPU (AMD Ryzen 5 2600X), Windows 11,
+Python 3.12, код коммита 98b7adc без незакоммиченных правок (`environment.git_sha` и `git_dirty` в `results.json`).
 
 Как читать:
 
