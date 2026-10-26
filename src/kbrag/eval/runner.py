@@ -31,9 +31,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -141,7 +143,30 @@ def run_experiment(
         threshold=threshold,
         index_stats=dict(pipeline.index_stats),
         score_source=pipeline.score_source,
+        provenance=data_fingerprint(docs, gold),
     )
+
+
+def data_fingerprint(docs: Sequence[Document], gold: Sequence[GoldItem]) -> dict[str, Any]:
+    """Отпечаток данных прогона: на каком именно корпусе и эталоне получены метрики.
+
+    В ``results.json`` уже лежит конфиг, но в нём только пути (``data/corpus``), а не содержимое:
+    правка одного документа или другая ``KBRAG_CORPUS_DIR`` меняют метрики при том же конфиге.
+    По хэшам сразу видно, сравнимы ли два отчёта. Хэш не зависит от порядка чтения файлов.
+    """
+    corpus = [[doc.doc_id, doc.title, doc.text, doc.metadata] for doc in sorted(docs, key=lambda d: d.doc_id)]
+    return {
+        "corpus_sha256": _short_sha256(corpus),
+        "gold_sha256": _short_sha256([asdict(item) for item in gold]),
+        "n_docs": len(docs),
+        "n_gold": len(gold),
+    }
+
+
+def _short_sha256(obj: Any) -> str:
+    # sort_keys — чтобы порядок ключей словарей не менял хэш; default=str — для дат из шапок документов.
+    payload = json.dumps(obj, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass

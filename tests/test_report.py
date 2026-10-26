@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import math
+import platform
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from kbrag.eval.report import (
+    ENVIRONMENT_PACKAGES,
     format_number,
     load_results,
     render_leaderboard,
@@ -211,6 +213,15 @@ def test_results_json_content(tmp_path: Path, results: list[ExperimentResult]) -
     assert experiments["bm25"]["per_question_file"] == "per_question/bm25.jsonl"
     assert "per_question" not in experiments["bm25"]  # ответы — только в JSONL, без дублирования
     assert experiments["dense-e5"]["skipped"].startswith("нет пакета")
+
+
+def test_results_json_records_environment(tmp_path: Path, results: list[ExperimentResult]) -> None:
+    # Регрессия: по отчёту нельзя было узнать версии Python и пакетов, давших эти числа.
+    write_report(results, tmp_path)
+    environment = json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))["environment"]
+    assert environment["python"] == platform.python_version()
+    assert environment["packages"]["numpy"] == np.__version__
+    assert set(environment["packages"]) == set(ENVIRONMENT_PACKAGES)
 
 
 def test_per_question_jsonl_content(tmp_path: Path, results: list[ExperimentResult]) -> None:

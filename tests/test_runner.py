@@ -582,3 +582,31 @@ def test_typo_in_overrides_fails_even_for_skipped_experiment(
 
     with pytest.raises(ValueError, match="mod"):  # pydantic.ValidationError — подкласс ValueError
         run_grid(path)
+
+
+# ---------------------------------------------------------------------------
+# Отпечаток данных
+# ---------------------------------------------------------------------------
+
+
+def test_result_records_data_fingerprint(gold: list[GoldItem], mini_docs: list[Document]) -> None:
+    # Регрессия: results.json хранил только пути к данным, и отчёты по разным версиям корпуса
+    # с одинаковым конфигом было не отличить.
+    result = run_experiment(make_cfg(), gold=gold, docs=mini_docs)
+    assert result.provenance == runner.data_fingerprint(mini_docs, gold)
+    assert result.provenance["n_docs"] == 4 and result.provenance["n_gold"] == 5
+
+
+def test_data_fingerprint_follows_content_not_order(gold: list[GoldItem], mini_docs: list[Document]) -> None:
+    base = runner.data_fingerprint(mini_docs, gold)
+    assert runner.data_fingerprint(list(reversed(mini_docs)), gold) == base  # порядок чтения файлов не важен
+
+    edited = [dataclasses.replace(mini_docs[0], text=mini_docs[0].text + " Правка."), *mini_docs[1:]]
+    assert runner.data_fingerprint(edited, gold)["corpus_sha256"] != base["corpus_sha256"]
+    first = mini_docs[0]
+    flipped = (
+        "active" if first.metadata.get("status") == "archived" else "archived"
+    )  # статус влияет на метрики
+    restatused = [dataclasses.replace(first, metadata={**first.metadata, "status": flipped}), *mini_docs[1:]]
+    assert runner.data_fingerprint(restatused, gold)["corpus_sha256"] != base["corpus_sha256"]
+    assert runner.data_fingerprint(mini_docs, gold[:-1])["gold_sha256"] != base["gold_sha256"]

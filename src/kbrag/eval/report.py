@@ -2,7 +2,8 @@
 
 Что пишется в ``out_dir``:
 
-* ``results.json`` — конфиги, метрики, пороги и статистика индекса всех экспериментов;
+* ``results.json`` — конфиги, метрики, пороги и статистика индекса всех экспериментов,
+  отпечаток данных каждого прогона (``provenance``) и версии Python/пакетов (``environment``);
 * ``per_question/<name>.jsonl`` — ответ и метрики по каждому вопросу (для разбора ошибок);
 * ``leaderboard.md`` — две таблицы (поиск; ответы и отказы), 95% интервалы Recall@5 и
   отличие каждой строки от лидера (bootstrap), разбивка Recall@5 по типам вопросов,
@@ -22,8 +23,10 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import math
+import platform
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -61,6 +64,16 @@ DIFF_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 SORT_METRIC = "recall@5"
 CONFUSABLE_TYPE = "confusable"
+# Пакеты, версии которых пишутся в results.json (блок environment).
+ENVIRONMENT_PACKAGES = (
+    "kbrag",
+    "numpy",
+    "scikit-learn",
+    "snowballstemmer",
+    "sentence-transformers",
+    "transformers",
+    "torch",
+)
 MISSING = "—"
 
 _LEGEND = """## Как читать таблицы
@@ -389,6 +402,22 @@ def render_leaderboard(results: Sequence[ExperimentResult], split: str = "test")
 # ---------------------------------------------------------------------------
 
 
+def environment_info() -> dict[str, Any]:
+    """Где получен отчёт: версии Python и пакетов, влияющих на числа.
+
+    Обновление torch, transformers или sentence-transformers может сдвинуть эмбеддинги,
+    а scikit-learn — LSA; без этих строк расхождение двух отчётов с одинаковым конфигом
+    не объяснить. Ревизии моделей Hugging Face здесь пока не фиксируются.
+    """
+    packages: dict[str, str | None] = {}
+    for name in ENVIRONMENT_PACKAGES:
+        try:
+            packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            packages[name] = None  # не установлен (например, офлайн-режим без нейросетей)
+    return {"python": platform.python_version(), "platform": platform.platform(), "packages": packages}
+
+
 def write_report(results: Sequence[ExperimentResult], out_dir: str | Path, split: str = "test") -> Path:
     """Пишет ``results.json``, ``per_question/<name>.jsonl``, ``leaderboard.md``.
 
@@ -412,7 +441,7 @@ def write_report(results: Sequence[ExperimentResult], out_dir: str | Path, split
             record["per_question_file"] = relative
         experiments.append(record)
 
-    payload = {"report_split": split, "experiments": experiments}
+    payload = {"report_split": split, "environment": environment_info(), "experiments": experiments}
     (out / "results.json").write_text(_dump_json(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
 
     leaderboard = out / "leaderboard.md"

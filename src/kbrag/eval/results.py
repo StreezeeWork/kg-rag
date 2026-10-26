@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 DEFAULT_K_VALUES = (1, 3, 5, 10)
@@ -86,6 +86,9 @@ class ExperimentResult:
 
     ``score_source`` — шкала уверенности, к которой относится ``threshold``
     (``rerank`` / ``dense`` / ``bm25``): порог 20.5 по BM25 и 0.5 по косинусу несравнимы.
+
+    ``provenance`` — отпечаток данных прогона (хэши корпуса и эталона, см.
+    ``runner.data_fingerprint``): конфиг хранит только пути, а не содержимое файлов.
     """
 
     name: str
@@ -96,6 +99,7 @@ class ExperimentResult:
     index_stats: dict
     skipped: str | None = None
     score_source: str | None = None
+    provenance: dict = field(default_factory=dict)
 
     @property
     def is_skipped(self) -> bool:
@@ -123,6 +127,7 @@ class ExperimentResult:
             index_stats=dict(data.get("index_stats") or {}),
             skipped=data.get("skipped"),
             score_source=data.get("score_source"),
+            provenance=dict(data.get("provenance") or {}),
         )
 
     @classmethod
