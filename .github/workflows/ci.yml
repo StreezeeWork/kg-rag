@@ -92,7 +92,7 @@ jobs:
       - name: Upload reports
         # always(): отчёт нужен и тогда, когда quality gate не пройден, — чтобы понять, что сломалось.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reports-py${{ matrix.python-version }}
           path: reports/
