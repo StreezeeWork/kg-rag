@@ -14,7 +14,7 @@
 #   bm25_fixed → bm25_recursive_noheader (нарезка) → bm25_recursive (заголовки);
 #   bm25_recursive → lsa_dense (тип поиска) → hybrid_bm25_lsa (гибрид) → *_weighted (слияние);
 #   lsa_dense → e5_dense и hybrid_bm25_lsa → hybrid_bm25_e5 (модель эмбеддингов);
-#   hybrid_bm25_e5 → *_rerank (реранкер) → *_chunk100 / *_chunk300 (размер фрагмента);
+#   hybrid_bm25_e5 → *_rerank (реранкер) → *_chunk100 → *_chunk60 (размер фрагмента: 180 → 100 → 60);
 #   hybrid_bm25_e5_rerank → bge_m3_hybrid_rerank (размер моделей).
 #
 # Два эксперимента совпадают с «боевыми» конфигами по настройкам нарезки и поиска:
@@ -111,6 +111,13 @@ experiments:
       rerank: {enabled: true, model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
 
   # --- Размер фрагмента при лучшей схеме поиска ----------------------------------
+  # Самый длинный раздел корпуса — 166 слов. RecursiveChunker режет раздел, только если он
+  # длиннее chunk_size, поэтому при боевом 180 (и любом значении ≥ 166) каждый раздел — ровно
+  # один фрагмент (258 фрагментов). Ось размера реальна только вниз: 100 → 311 фрагментов,
+  # 60 → 496. Гипотезу «крупные фрагменты хуже» стратегией recursive на этом корпусе проверить
+  # нельзя (chunk_size: 300 дал бы ту же нарезку, что 180, и строку-дубль в leaderboard),
+  # поэтому такого эксперимента в сетке нет. Урок: гиперпараметр надо сверять с данными.
+  # tests/test_configs.py проверяет, что каждый шаг этой оси действительно меняет нарезку.
   - name: hybrid_bm25_e5_rerank_chunk100
     description: "Мелкие фрагменты (100 слов) точнее для поиска, но могут разрывать факт и его контекст"
     requires_neural: true
@@ -125,12 +132,12 @@ experiments:
         hybrid: {fusion: rrf}
       rerank: {enabled: true, model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
 
-  - name: hybrid_bm25_e5_rerank_chunk300
-    description: "Крупные фрагменты (300 слов) держат контекст целиком, но размывают эмбеддинг и шумят в ответе"
+  - name: hybrid_bm25_e5_rerank_chunk60
+    description: "Совсем мелкие фрагменты (60 слов) режут разделы на абзацы и предложения: продолжает тренд 180 → 100"
     requires_neural: true
     heavy: false
     overrides:
-      chunking: {strategy: recursive, chunk_size: 300, with_header: true}
+      chunking: {strategy: recursive, chunk_size: 60, with_header: true}
       retrieval:
         mode: hybrid
         top_k: 5
