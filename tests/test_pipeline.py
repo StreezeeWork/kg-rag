@@ -36,13 +36,14 @@ class SpyGenerator(Generator):
 
     name = "spy"
 
-    def __init__(self, text: str = "Ответ по документу [1].") -> None:
+    def __init__(self, text: str = "Ответ по документу [1].", abstained: bool = False) -> None:
         self.text = text
+        self.abstained = abstained
         self.calls: list[tuple[str, list[ScoredChunk]]] = []
 
     def generate(self, question: str, contexts: list[ScoredChunk]) -> GenerationResult:
         self.calls.append((question, contexts))
-        return GenerationResult(text=self.text, abstained=False, usage={"total_tokens": 7})
+        return GenerationResult(text=self.text, abstained=self.abstained, usage={"total_tokens": 7})
 
 
 class ReverseReranker(Reranker):
@@ -345,6 +346,22 @@ def test_citations_are_parsed_against_generator_contexts(tmp_path: Path, mini_do
     assert answer.citations[0].index == 1
     assert answer.invalid_citations == 1  # [9] — номера нет в контексте
     assert answer.usage == {"total_tokens": 7}
+
+
+def test_generator_abstention_is_returned_as_fixed_phrase_without_citations(
+    tmp_path: Path, mini_docs: list[Document]
+) -> None:
+    # LLM отказалась, но «из вежливости» поставила ссылку: сервис должен показать то же, что
+    # считает оценка, — фиксированную фразу отказа без ссылок (а не бейдж «нет ответа» со ссылкой [1]).
+    spy = SpyGenerator(text="К сожалению, в базе знаний нет ответа на этот вопрос. [1]", abstained=True)
+    pipeline = build_pipeline(make_cfg(tmp_path), mini_docs, generator=spy)
+
+    answer = pipeline.answer(VACATION_Q)
+
+    assert answer.abstained
+    assert answer.text == ABSTAIN_TEXT
+    assert answer.citations == [] and answer.invalid_citations == 0
+    assert LOW_CONFIDENCE_FLAG not in answer.flags
 
 
 # ---------------------------------------------------------------------------

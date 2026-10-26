@@ -25,8 +25,13 @@ def make_context(docs: list[Document], doc_id: str, needle: str, section: str = 
     for i, match in enumerate(_PARAGRAPH_RE.finditer(doc.text)):
         if needle in match.group():
             chunk = Chunk(
-                chunk_id=f"{doc_id}::{i:03d}", doc_id=doc_id, text=match.group(),
-                start=match.start(), end=match.end(), title=doc.title, section=section,
+                chunk_id=f"{doc_id}::{i:03d}",
+                doc_id=doc_id,
+                text=match.group(),
+                start=match.start(),
+                end=match.end(),
+                title=doc.title,
+                section=section,
                 metadata=dict(doc.metadata),
             )
             return ScoredChunk(chunk=chunk, score=1.0, source="bm25", details={"bm25": 1.0})
@@ -36,7 +41,7 @@ def make_context(docs: list[Document], doc_id: str, needle: str, section: str = 
 def inner(context: str) -> str:
     """Содержимое между тегами <context> — именно на него действует max_chars."""
     assert context.startswith(_OPEN) and context.endswith(_CLOSE)
-    return context[len(_OPEN): -len(_CLOSE)]
+    return context[len(_OPEN) : -len(_CLOSE)]
 
 
 @pytest.fixture()
@@ -179,3 +184,36 @@ def test_abstention_is_recognized_despite_case_and_punctuation(answer: str) -> N
 )
 def test_regular_answers_are_not_abstentions(answer: str) -> None:
     assert not is_abstention(answer)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # Частичный ответ: на одну часть вопроса ответ есть, про другую модель честно говорит,
+        # что данных нет. Раньше любой ответ с фразой отказа внутри считался отказом и обнулялся.
+        "Отпуск длится 28 календарных дней [1]. О порядке переноса в базе знаний нет ответа на этот вопрос.",
+        "28 дней [1]. В базе знаний нет ответа на этот вопрос.",
+        "В базе знаний нет ответа на этот вопрос, но отпуск длится 28 дней [1].",
+    ],
+)
+def test_partial_answer_with_abstain_phrase_is_not_abstention(answer: str) -> None:
+    assert not is_abstention(answer)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "В базе знаний нет ответа на этот вопрос. [1]",
+        "Увы, но в базе знаний нет ответа на этот вопрос [2, 3]",
+    ],
+)
+def test_abstention_with_citation_or_polite_words_is_still_abstention(answer: str) -> None:
+    assert is_abstention(answer)
+
+
+def test_prompt_explains_partial_answers_and_refusal_without_citations(
+    three_contexts: list[ScoredChunk],
+) -> None:
+    assert "только на часть вопроса" in SYSTEM_PROMPT
+    user = build_messages("Сколько длится отпуск?", three_contexts)[1]["content"]
+    assert user.rstrip().endswith("только фраза отказа, без ссылок.")

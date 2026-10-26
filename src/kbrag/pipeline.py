@@ -345,13 +345,20 @@ class RAGPipeline:
         gen_started = time.perf_counter()
         result = self.generator.generate(question, prompt_contexts)
         timings["generate_ms"] = _elapsed_ms(gen_started)
-        # Номер [n] в ответе — это позиция в списке, который видел генератор. После drop_chunk
-        # он может не совпасть с позицией в Answer.contexts; надёжная связь — Citation.chunk_id.
-        citations, invalid = parse_citations(result.text, prompt_contexts)
+        if result.abstained:
+            # Отказ генератора выглядит так же, как отказ по порогу: фиксированная фраза и никаких
+            # ссылок. Иначе «К сожалению, в базе знаний нет ответа… [1]» показал бы ссылку на
+            # фрагмент, которым ответ якобы подтверждён, а оценка видела бы другой текст, чем сервис.
+            text, citations, invalid = ABSTAIN_TEXT, [], 0
+        else:
+            # Номер [n] в ответе — это позиция в списке, который видел генератор. После drop_chunk
+            # он может не совпасть с позицией в Answer.contexts; надёжная связь — Citation.chunk_id.
+            text = result.text
+            citations, invalid = parse_citations(text, prompt_contexts)
         timings["total_ms"] = search_ms + _elapsed_ms(started)
         return Answer(
             question=question,
-            text=result.text,
+            text=text,
             citations=citations,
             contexts=contexts,
             abstained=result.abstained,

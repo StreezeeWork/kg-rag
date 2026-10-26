@@ -12,8 +12,10 @@ import re
 
 from kbrag.types import Citation, ScoredChunk
 
-# «[1]», «[1, 2]», «[1,2;3]»; подряд идущие «[1][3]» — это просто два совпадения.
-_CITATION_RE = re.compile(r"\[\s*(\d+(?:\s*[,;]\s*\d+)*)\s*\]")
+# «[1]», «[1, 2]», «[1,2;3]», «[ 2 ]»; подряд идущие «[1][3]» — это просто два совпадения.
+# Единственное определение формата ссылки: его используют и разбор ссылок, и распознавание
+# отказа (prompts.is_abstention).
+CITATION_RE = re.compile(r"\[\s*(\d+(?:\s*[,;]\s*\d+)*)\s*\]")
 _NUMBER_RE = re.compile(r"\d+")
 
 
@@ -27,7 +29,7 @@ def parse_citations(text: str, contexts: list[ScoredChunk]) -> tuple[list[Citati
     citations: list[Citation] = []
     seen: set[int] = set()
     invalid: set[int] = set()
-    for match in _CITATION_RE.finditer(text):
+    for match in CITATION_RE.finditer(text):
         for raw_number in _NUMBER_RE.findall(match.group(1)):
             number = int(raw_number)
             if not 1 <= number <= len(contexts):
