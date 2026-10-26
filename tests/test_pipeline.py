@@ -428,6 +428,21 @@ def test_guardrails_hide_injection_from_generator_but_keep_original_contexts(
         assert docs_by_id[item.chunk.doc_id].text[item.chunk.start : item.chunk.end] == item.chunk.text
 
 
+def test_injection_is_flagged_even_when_answer_is_refused_by_threshold(
+    tmp_path: Path, mini_docs: list[Document]
+) -> None:
+    # При отказе по порогу пользователь всё равно видит найденные фрагменты, поэтому фрагмент
+    # с инъекцией должен быть помечен так же, как при обычном ответе (и попасть в /metrics).
+    spy = SpyGenerator()
+    pipeline = build_pipeline(make_cfg(tmp_path), mini_docs, generator=spy, threshold=1e9)
+
+    answer = pipeline.answer(REMOTE_Q)
+
+    assert answer.abstained and spy.calls == []
+    assert LOW_CONFIDENCE_FLAG in answer.flags
+    assert "prompt_injection:hr-remote-2025::000" in answer.flags
+
+
 def test_guardrails_disabled_passes_injection_through(tmp_path: Path, mini_docs: list[Document]) -> None:
     spy = SpyGenerator()
     pipeline = build_pipeline(make_cfg(tmp_path, guardrails={"enabled": False}), mini_docs, generator=spy)

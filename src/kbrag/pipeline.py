@@ -9,8 +9,9 @@
 
     вопрос ──► retrieve(): поиск candidates_k/top_k ──► [реранкер] ──► top_k фрагментов
            ──► confidence(): насколько поиск «уверен», что нашёл ответ
+           ──► guardrails: пометить и вычистить инъекции во фрагментах
            ──► confidence < threshold? ──да──► отказ (генератор не вызывается)
-                                       └─нет─► guardrails ──► генератор ──► разбор ссылок [n]
+                                       └─нет─► генератор ──► разбор ссылок [n]
 
 Порог отказа подбирается при оценке (``kbrag eval``) на dev-выборке и сохраняется в файл
 калибровки. Сервис читает его, только если файл посчитан для того же поиска (совпадает
@@ -322,6 +323,16 @@ class RAGPipeline:
         flags = check_question(question) if guardrails.enabled else []
         confidence = self.confidence(contexts)
 
+        # Guardrails — ДО решения об отказе: пометки «подозрительный текст» нужны и тогда, когда
+        # генератор не вызывается. При отказе пользователь всё равно видит найденные фрагменты
+        # («ближайшие фрагменты»), и фрагмент с инъекцией должен быть помечен, а /metrics — посчитан.
+        # Генератор получает очищенные КОПИИ фрагментов, а пользователь и метрики — исходные:
+        # у копии после удаления строки текст уже не совпадает с документом по смещениям.
+        prompt_contexts = contexts
+        if guardrails.enabled:
+            prompt_contexts, injection_flags = sanitize_contexts(contexts, action=guardrails.action)
+            flags.extend(injection_flags)
+
         if apply_threshold and self.should_abstain(confidence):
             # Отказываемся до генерации: экономим вызов LLM и не даём ей «додумать» ответ
             # по нерелевантным фрагментам. Контексты всё равно возвращаем — для отладки.
@@ -338,12 +349,6 @@ class RAGPipeline:
                 confidence=confidence,
             )
 
-        # Генератор получает очищенные КОПИИ фрагментов, а пользователь и метрики — исходные:
-        # у копии после удаления строки текст уже не совпадает с документом по смещениям.
-        prompt_contexts = contexts
-        if guardrails.enabled:
-            prompt_contexts, injection_flags = sanitize_contexts(contexts, action=guardrails.action)
-            flags.extend(injection_flags)
         # Лимит длины контекста применяем здесь, один раз для любого генератора: extractive и LLM
         # видят одинаковый набор фрагментов, а ссылки [n] проверяются ровно по показанным —
         # иначе ссылка LLM на номер, вырезанный из промпта, засчитывалась бы как настоящая.
