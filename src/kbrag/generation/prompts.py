@@ -44,22 +44,36 @@ SYSTEM_PROMPT = f"""\
 _BLOCK_SEP = "\n\n"
 _MISSING = "—"
 # Фрагмент не должен «закрыть» обёртку раньше времени: </context> внутри документа
-# позволил бы выдать дальнейший текст за инструкции вне контекста.
-_CONTEXT_TAG_RE = re.compile(r"<\s*(/?)\s*context\s*>", re.IGNORECASE)
+# позволил бы выдать дальнейший текст за инструкции вне контекста. Шапка блока (название,
+# раздел, статус, дата) — такие же данные из документа, поэтому экранируется так же.
+# Запись `(?:(/)\s*)?` вместо `(/?)\s*` однозначна: у «<» и сотни пробелов без «context»
+# движок не перебирает, какие пробелы отнести к какому `\s*`, — время линейное, а не квадратичное.
+_CONTEXT_TAG_RE = re.compile(r"<\s*(?:(/)\s*)?context\s*>", re.IGNORECASE)
+_LINE_BREAK_RE = re.compile(r"[\r\n]+")
 
 
 def _escape_context_tags(text: str) -> str:
     return _CONTEXT_TAG_RE.sub(r"[\1context]", text)
 
 
+def _header_field(value: object) -> str:
+    """Значение для шапки блока: без переводов строк и тегов ``<context>``.
+
+    Перевод строки в названии (YAML ``title: |``) позволил бы автору документа дописать после
+    шапки собственный «блок» ``[2] Документ: …`` с выдуманными статусом и датой.
+    """
+    text = _LINE_BREAK_RE.sub(" ", str(value or "")).strip()
+    return _escape_context_tags(text) or _MISSING
+
+
 def _format_block(number: int, scored: ScoredChunk) -> str:
     chunk = scored.chunk
     meta = chunk.metadata
     header = (
-        f"[{number}] Документ: {chunk.title or _MISSING}"
-        f" | Раздел: {chunk.section or _MISSING}"
-        f" | Статус: {meta.get('status') or _MISSING}"
-        f" | Обновлён: {meta.get('updated') or _MISSING}"
+        f"[{number}] Документ: {_header_field(chunk.title)}"
+        f" | Раздел: {_header_field(chunk.section)}"
+        f" | Статус: {_header_field(meta.get('status'))}"
+        f" | Обновлён: {_header_field(meta.get('updated'))}"
     )
     return f"{header}\n{_escape_context_tags(chunk.text)}"
 

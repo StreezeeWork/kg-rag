@@ -265,7 +265,7 @@ class ServiceMetrics:
             self._latency_count += 1
 
     def observe_answer(self, abstained: bool, n_injection_flags: int) -> None:
-        """Учитывает исход ответа: отказ и найденные попытки prompt injection."""
+        """Учитывает исход ответа: отказ и флаги prompt injection (фрагменты в выдаче и вопрос)."""
         with self._lock:
             self._abstained += int(abstained)
             self._injection_flags += n_injection_flags
@@ -289,7 +289,10 @@ class ServiceMetrics:
             "# HELP kbrag_abstained_total Число ответов-отказов («в базе знаний нет ответа»).",
             "# TYPE kbrag_abstained_total counter",
             f"kbrag_abstained_total {abstained}",
-            "# HELP kbrag_injection_flags_total Число найденных попыток prompt injection (во фрагментах и вопросах).",
+            # Это не «число атак»: один и тот же помеченный фрагмент считается в каждом ответе,
+            # где он оказался в выдаче. Рост счётчика — повод посмотреть, какие фрагменты помечены.
+            "# HELP kbrag_injection_flags_total Флаги prompt injection в ответах: по одному на каждый"
+            " помеченный фрагмент в выдаче и на вопрос.",
             "# TYPE kbrag_injection_flags_total counter",
             f"kbrag_injection_flags_total {injections}",
             f"# HELP kbrag_request_latency_ms Время обработки запроса {LATENCY_ENDPOINT}, мс.",
