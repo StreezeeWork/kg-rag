@@ -15,11 +15,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import logging
 import os
 import sys
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,6 +39,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 NEURAL_INSTALL_HINT = "pip install -e .[neural]"
+# Версия формата кэша эмбеддингов (входит в ключ). Увеличьте, если меняется способ получения
+# векторов (нормировка, dtype, состав ключа), — тогда все старые файлы перестанут подхватываться.
+EMBEDDING_CACHE_VERSION = 2
 
 
 def l2_normalize(vectors: np.ndarray) -> np.ndarray:
@@ -215,7 +220,7 @@ class SentenceTransformerEmbedder(Embedder):
         cache_dir: str | None = None,
     ) -> None:
         try:
-            from sentence_transformers import SentenceTransformer
+            import sentence_transformers
         except ImportError as exc:
             raise ImportError(
                 f"Для нейросетевых эмбеддингов нужны дополнительные зависимости: {NEURAL_INSTALL_HINT}"
@@ -230,7 +235,12 @@ class SentenceTransformerEmbedder(Embedder):
         self.batch_size = batch_size
         self.device = resolve_device(device)
         self.cache_dir = cache_dir
-        self.model = SentenceTransformer(model_name, device=self.device)
+        self.model = sentence_transformers.SentenceTransformer(model_name, device=self.device)
+        # Ревизия весов (commit снапшота на HF Hub; у локальной папки её нет) и версия библиотеки
+        # входят в ключ кэша: обновили модель или sentence-transformers — старые векторы не подхватятся.
+        model_card = getattr(self.model, "model_card_data", None)
+        self.model_revision: str = getattr(model_card, "base_model_revision", None) or ""
+        self.library_version: str = getattr(sentence_transformers, "__version__", "unknown")
 
     def encode_queries(self, texts: list[str]) -> np.ndarray:
         # Запросы не кэшируем: они каждый раз новые, а кодируются быстро.
@@ -252,13 +262,22 @@ class SentenceTransformerEmbedder(Embedder):
     def cache_path(self, texts: list[str]) -> Path | None:
         """Путь к кэшу: ``{cache_dir}/emb/{sha1[:20]}.npy`` (коротко из-за MAX_PATH в Windows).
 
-        В хэш входят модель, префикс и все тексты: изменился хоть один символ — новый файл,
-        поэтому устаревший кэш никогда не подхватится.
+        В хэш входят версия формата кэша, имя и ревизия модели, версия sentence-transformers,
+        префикс и все тексты: изменился хоть один символ — новый файл. Чего ключ не видит:
+        веса, заменённые «на месте» в локальной папке под тем же путём (у неё нет ревизии).
+        В этом случае удалите ``{cache_dir}/emb`` — это безопасно, векторы просто пересчитаются.
         """
         if self.cache_dir is None:
             return None
         digest = hashlib.sha1()
-        for part in (self.model_name, self.passage_prefix, *texts):
+        key_parts = (
+            str(EMBEDDING_CACHE_VERSION),
+            self.model_name,
+            self.model_revision,
+            self.library_version,
+            self.passage_prefix,
+        )
+        for part in (*key_parts, *texts):
             digest.update(part.encode("utf-8"))
             digest.update(b"\x00")  # разделитель: ["ab", "c"] и ["a", "bc"] дают разные хэши
         return Path(self.cache_dir) / "emb" / f"{digest.hexdigest()[:20]}.npy"
@@ -290,13 +309,26 @@ class SentenceTransformerEmbedder(Embedder):
 
     @staticmethod
     def _save_cache(path: Path, vectors: np.ndarray) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Пишем во временный файл и атомарно переименовываем: если процесс упадёт посреди
-        # записи, на диске не останется «половинки», которую потом примут за кэш.
-        tmp_path = path.with_suffix(".tmp")
-        with open(tmp_path, "wb") as fh:
-            np.save(fh, vectors)
-        os.replace(tmp_path, path)
+        """Сохраняет векторы в кэш. Ошибка записи не роняет оценку или сервис: кэш — лишь ускорение."""
+        tmp_path: Path | None = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Пишем во временный файл и атомарно переименовываем: если процесс упадёт посреди
+            # записи, на диске не останется «половинки», которую потом примут за кэш. Имя tmp
+            # уникально, чтобы два процесса (например, `kbrag serve` и `kbrag eval`) не писали в один файл.
+            with tempfile.NamedTemporaryFile(
+                dir=path.parent, prefix=f"{path.stem}.", suffix=".tmp", delete=False
+            ) as fh:
+                tmp_path = Path(fh.name)
+                np.save(fh, vectors)
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            # Например, на Windows os.replace падает, если целевой файл сейчас читает другой процесс.
+            # Обычно это значит, что параллельный процесс уже записал те же векторы (ключ тот же).
+            logger.warning("Не удалось сохранить кэш эмбеддингов %s (%s) — работаем без него", path, exc)
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
 
 
 def make_embedder(cfg: DenseConfig, cache_dir: str | None = None) -> Embedder:

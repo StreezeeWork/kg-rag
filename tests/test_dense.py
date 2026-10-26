@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 import types
@@ -412,6 +413,73 @@ def test_cache_key_depends_on_model_prefix_and_texts(fake_st: types.ModuleType, 
     assert base != path_for("model-a", ["ab", "c"], prefix="passage: ")
     assert base != path_for("model-a", ["a", "bc"])  # границы между текстами учитываются
     assert base != path_for("model-a", ["ab", "c", "d"])
+
+
+def test_cache_key_depends_on_model_revision_and_library_version(
+    fake_st: types.ModuleType, tmp_path: Path
+) -> None:
+    # Регрессия: ключ не учитывал ревизию весов и версию библиотеки, и после обновления
+    # модели под тем же именем молча подхватывались старые векторы.
+    texts = ["отпуск 28 дней"]
+    base = SentenceTransformerEmbedder("model-a", device="cpu", cache_dir=str(tmp_path)).cache_path(texts)
+
+    class RevisionedModel(FakeSentenceTransformer):
+        model_card_data = types.SimpleNamespace(base_model_revision="614241f6")
+
+    fake_st.SentenceTransformer = RevisionedModel
+    revisioned = SentenceTransformerEmbedder("model-a", device="cpu", cache_dir=str(tmp_path))
+    assert revisioned.model_revision == "614241f6"
+    assert revisioned.cache_path(texts) != base
+
+    fake_st.SentenceTransformer = FakeSentenceTransformer
+    fake_st.__version__ = "99.0"
+    assert (
+        SentenceTransformerEmbedder("model-a", device="cpu", cache_dir=str(tmp_path)).cache_path(texts)
+        != base
+    )
+
+
+def test_cache_write_failure_is_not_fatal(
+    fake_st: types.ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Регрессия: на Windows os.replace бросает PermissionError, если кэш-файл открыт другим
+    # процессом, и это роняло всю оценку, хотя кэш — лишь ускорение.
+    def locked_replace(src, dst):
+        raise PermissionError(32, "файл занят другим процессом")
+
+    monkeypatch.setattr("kbrag.retrieval.embeddings.os.replace", locked_replace)
+    embedder = SentenceTransformerEmbedder("model-a", device="cpu", cache_dir=str(tmp_path))
+    with caplog.at_level(logging.WARNING, logger="kbrag.retrieval.embeddings"):
+        vectors = embedder.encode_passages(["первый", "второй"])
+    assert vectors.shape == (2, 3)
+    assert "Не удалось сохранить кэш" in caplog.text
+    assert list((tmp_path / "emb").iterdir()) == []  # временный файл убран, «половинок» нет
+
+
+def test_cache_temp_files_are_unique(
+    fake_st: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Регрессия: временный файл назывался path.with_suffix(".tmp") — один на всех, и два процесса
+    # с одним ключом писали в него одновременно.
+    sources: list[str] = []
+    original_replace = os.replace
+
+    def recording_replace(src, dst):
+        sources.append(str(src))
+        original_replace(src, dst)
+
+    monkeypatch.setattr("kbrag.retrieval.embeddings.os.replace", recording_replace)
+    path = tmp_path / "emb" / "0123456789abcdef0123.npy"
+    vectors = np.ones((2, 3), dtype=np.float32)
+    SentenceTransformerEmbedder._save_cache(path, vectors)
+    SentenceTransformerEmbedder._save_cache(path, vectors)
+    assert len(set(sources)) == 2
+    assert str(path.with_suffix(".tmp")) not in sources
+    np.testing.assert_array_equal(np.load(path), vectors)
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
 
 
 def test_corrupted_or_mismatched_cache_is_recomputed(fake_st: types.ModuleType, tmp_path: Path) -> None:
