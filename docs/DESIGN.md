@@ -198,6 +198,10 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   используется нормированный TF-IDF; фактический размер — атрибут `n_components`. Если компонент
   ≥ 0.9 от максимума, `fit` пишет предупреждение: SVD почти полного ранга ранжирует как TF-IDF без сжатия
   (на 258 фрагментах `lsa_dim: 256` — именно так); доля сохранённой дисперсии — `explained_variance`.
+  Поэтому `DenseConfig.lsa_dim` по умолчанию и в `offline.yaml` — 128 (подобрано на dev).
+- `DenseConfig.revision`, `RerankConfig.revision: str | None = None` — commit снапшота модели на HF Hub; передаётся
+  в `SentenceTransformer`/`CrossEncoder` только если задан (`default.yaml` закрепляет обе модели) и для эмбеддера
+  заменяет ревизию из карточки модели в ключе кэша. Новые поля конфига меняют `calibration_fingerprint`.
 - `Embedder.fit_encode_passages(texts)` (по умолчанию `fit` + `encode_passages`) — им индексирует
   `DenseRetriever`; LSA переиспользует матрицу TF-IDF из обучения вместо повторного `transform`.
 - Ключ кэша эмбеддингов: `sha1(EMBEDDING_CACHE_VERSION, model, ревизия снапшота HF, версия
@@ -230,6 +234,8 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
 - `is_abstention` — True, только если в ответе есть фраза отказа, а вокруг неё лишь вежливые слова
   («К сожалению,») и ссылки `[n]`; частичный ответ с этой фразой — не отказ. При отказе генератора пайплайн
   возвращает ровно `ABSTAIN_TEXT` без ссылок (как оценка и отказ по порогу).
+- `GenerationConfig.base_url` и `JudgeConfig.base_url` проверяются при чтении конфига (`http://` или `https://`),
+  то есть и значение из `KBRAG_LLM_BASE_URL`.
 - `OpenAICompatibleClient`: `timeout_s` — общий лимит на `chat()` вместе с повторами и паузами; повтор только
   на 429/5xx и временные сетевые сбои (таймаут, `NetworkError`, `RemoteProtocolError`), при 429/503 пауза
   не меньше `Retry-After`; `base_url` без `http(s)://` → `ValueError` в конструкторе; пустой `content` →
@@ -252,7 +258,8 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   (score компонента `score_source`; `build_ask_response(answer, score_source=None)`). Тело запроса больше
   16 КиБ → 413; Host не из `$KBRAG_ALLOWED_HOSTS` (по умолчанию localhost, 127.0.0.1, [::1], app, testserver)
   → 400; 422 возвращает только `loc`/`msg`/`type` без эха ввода; `GET /` отдаётся с CSP по хешу встроенного
-  скрипта. Под голым uvicorn lifespan включает логи `kbrag` (уровень `$KBRAG_LOG_LEVEL`, по умолчанию INFO);
+  скрипта. Под голым uvicorn lifespan включает логи `kbrag` (уровень `$KBRAG_LOG_LEVEL`, по умолчанию INFO;
+  пустое или неизвестное значение — INFO, неизвестное — с предупреждением);
   отсутствие файла калибровки при `threshold: auto` — WARNING.
 
 **eval**
