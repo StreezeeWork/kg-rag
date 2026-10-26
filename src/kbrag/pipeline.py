@@ -289,6 +289,10 @@ class RAGPipeline:
 
         None — если ни у одного фрагмента нет нужной оценки (например, поиск ничего
         не нашёл): такой вопрос при заданном пороге получает отказ.
+
+        Ограничение, о котором стоит помнить: это сигнал *поиска*, а не ответа. На вопросе
+        «тема есть, а нужного факта нет» (тариф, которого нет в базе) поиск находит тематически
+        близкий фрагмент с высоким score, и порог такой вопрос не отсекает.
         """
         values = [item.details[self.score_source] for item in contexts if self.score_source in item.details]
         return max(values) if values else None
@@ -298,9 +302,24 @@ class RAGPipeline:
 
         ``apply_threshold=False`` использует оценка: она прогоняет все вопросы без порога,
         а порог подбирает и применяет потом сама (подробнее — ``kbrag.eval.runner``).
+
+        Уверенность всегда считается по первым ``cfg.retrieval.top_k`` фрагментам — на них порог
+        калибровался в ``kbrag eval``, — даже если в запросе другой ``top_k``. Иначе запрос с
+        ``top_k=1`` или ``20`` сравнивал бы с порогом другую величину: в гибриде лучший по dense
+        фрагмент может стоять в выдаче ниже пятого места. Выдача с бо́льшим k — продолжение
+        выдачи с меньшим (пул кандидатов у поиска и реранкера фиксирован), поэтому берём
+        одну выдачу длины ``max(top_k, cfg.top_k)`` и режем её на две части.
         """
-        contexts, timings = self.retrieve(question, top_k)
-        return self.answer_with_contexts(question, contexts, timings=timings, apply_threshold=apply_threshold)
+        top_k = self._resolve_top_k(top_k)
+        calibration_k = self.cfg.retrieval.top_k
+        retrieved, timings = self.retrieve(question, max(top_k, calibration_k))
+        return self.answer_with_contexts(
+            question,
+            retrieved[:top_k],
+            timings=timings,
+            apply_threshold=apply_threshold,
+            confidence_contexts=retrieved[:calibration_k],
+        )
 
     def answer_with_contexts(
         self,
@@ -308,6 +327,7 @@ class RAGPipeline:
         contexts: list[ScoredChunk],
         timings: dict[str, float] | None = None,
         apply_threshold: bool = True,
+        confidence_contexts: list[ScoredChunk] | None = None,
     ) -> Answer:
         """Вторая половина ``answer``: всё, что происходит после поиска.
 
@@ -315,13 +335,14 @@ class RAGPipeline:
         (для Recall@10) и отдать генератору её начало — без второго поиска.
         ``timings`` — тайминги поиска из ``retrieve``; ``total_ms`` = поиск + реранкинг +
         всё, что сделано здесь (guardrails, генерация, разбор ссылок).
+        ``confidence_contexts`` — по каким фрагментам считать уверенность (по умолчанию — ``contexts``).
         """
         started = time.perf_counter()
         timings = {"retrieve_ms": 0.0, "rerank_ms": 0.0, **(timings or {})}
         search_ms = timings["retrieve_ms"] + timings["rerank_ms"]
         guardrails = self.cfg.guardrails
         flags = check_question(question) if guardrails.enabled else []
-        confidence = self.confidence(contexts)
+        confidence = self.confidence(contexts if confidence_contexts is None else confidence_contexts)
 
         # Guardrails — ДО решения об отказе: пометки «подозрительный текст» нужны и тогда, когда
         # генератор не вызывается. При отказе пользователь всё равно видит найденные фрагменты

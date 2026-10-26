@@ -231,9 +231,11 @@ def test_health_reports_index_and_components(client: TestClient) -> None:
     assert body["n_chunks"] == 3
     assert body["index_stats"]["avg_chunk_words"] == 12.5
     assert body["retrieval_mode"] == "bm25"
+    assert body["top_k"] == AppConfig().retrieval.top_k  # подсказка для поля «Фрагментов» на странице
     # У фейкового пайплайна нет генератора и реранкера — сервис не падает, а честно пишет null.
     assert body["generator"] is None
     assert body["reranker"] is None
+    assert body["score_source"] is None
 
 
 def test_index_page_is_served_as_html(client: TestClient) -> None:
@@ -241,6 +243,13 @@ def test_index_page_is_served_as_html(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert "<title>kb-rag" in response.text
+
+
+def test_index_page_leaves_top_k_to_the_server_by_default(client: TestClient) -> None:
+    # Порог отказа откалиброван на top_k из конфига: страница не должна по умолчанию слать своё число.
+    page = client.get("/").text
+    top_k_input = next(line for line in page.splitlines() if 'id="top-k"' in line)
+    assert "value=" not in top_k_input
 
 
 # ---------------------------------------------------------------------------
@@ -428,3 +437,4 @@ def test_ask_with_real_offline_pipeline(mini_docs: list[Document]) -> None:
     assert health["retrieval_mode"] == "bm25"
     assert health["generator"] == "extractive"
     assert health["reranker"] is None
+    assert health["top_k"] == 3 and health["score_source"] == "bm25"

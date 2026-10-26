@@ -434,8 +434,13 @@ def _add_routes(app: FastAPI, state: ServiceState) -> None:
             "n_chunks": stats.get("n_chunks"),
             "index_stats": stats,
             "retrieval_mode": state.cfg.retrieval.mode if state.cfg is not None else None,
+            # top_k по умолчанию: страница показывает его в поле «Фрагментов». Порог отказа
+            # откалиброван именно для него (уверенность всегда считается по первым top_k фрагментам).
+            "top_k": state.cfg.retrieval.top_k if state.cfg is not None else None,
             "reranker": _component_name(pipeline, "reranker"),
             "generator": _component_name(pipeline, "generator"),
+            # Из какого score поиска берётся «уверенность» (rerank / dense / bm25).
+            "score_source": getattr(pipeline, "score_source", None),
             "abstention_threshold": _finite_or_none(getattr(pipeline, "threshold", None)),
         }
 

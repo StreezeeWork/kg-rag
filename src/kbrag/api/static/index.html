@@ -332,9 +332,10 @@
       <textarea id="question" name="question" maxlength="1000" rows="3" required
                 placeholder="Например: сколько дней ежегодного отпуска положено сотруднику?"></textarea>
       <div class="form-row">
-        <label class="topk" title="Сколько фрагментов базы знаний передать генератору ответа">
+        <label class="topk" title="Сколько фрагментов базы знаний передать генератору ответа. Пусто — значение из конфига сервиса">
           Фрагментов
-          <input type="number" id="top-k" name="top_k" min="1" max="20" step="1" value="5" inputmode="numeric">
+          <!-- По умолчанию поле пустое: тогда сервер берёт top_k из конфига (подсказка приходит из /health). -->
+          <input type="number" id="top-k" name="top_k" min="1" max="20" step="1" placeholder="авто" inputmode="numeric">
         </label>
         <span class="counter" id="counter" aria-live="off">0 / 1000</span>
         <span class="spacer"></span>
@@ -625,6 +626,8 @@
       }
       healthEl.dataset.state = "ok";
       healthEl.textContent = text;
+      // Подсказка в пустом поле «Фрагментов» — top_k из конфига сервиса (под него откалиброван порог).
+      if (body && Number.isInteger(body.top_k)) topKEl.placeholder = String(body.top_k);
     } catch {
       healthEl.dataset.state = "down";
       healthEl.textContent = "сервис недоступен";

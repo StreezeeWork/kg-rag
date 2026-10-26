@@ -241,6 +241,39 @@ def test_confidence_from_reranker_and_explicit_source(tmp_path: Path, mini_docs:
     )
 
 
+class FixedRetriever:
+    """Фальшивый поиск: всегда одна и та же выдача; dense-оценки заданы вручную."""
+
+    name = "fixed"
+
+    def __init__(self, chunks: list, dense_scores: list[float]) -> None:
+        self.chunks = chunks
+        self.results = [
+            ScoredChunk(chunk, 1.0 / (61 + i), "rrf", {"dense": dense})
+            for i, (chunk, dense) in enumerate(zip(chunks, dense_scores, strict=False))
+        ]
+
+    def search(self, query: str, k: int) -> list[ScoredChunk]:
+        return self.results[:k]
+
+
+def test_confidence_does_not_depend_on_requested_top_k(tmp_path: Path, mini_docs: list[Document]) -> None:
+    # В гибриде лучший по dense фрагмент может стоять не первым. Порог калибруется по первым
+    # cfg.top_k (= 3) фрагментам; запрос с top_k=1 раньше сравнивал с порогом max по одному фрагменту.
+    cfg = make_cfg(tmp_path, retrieval={"mode": "hybrid", "top_k": 3})
+    chunks = chunk_corpus(mini_docs, make_chunker(cfg.chunking))[:5]
+    retriever = FixedRetriever(chunks, dense_scores=[0.2, 0.9, 0.1, 0.95, 0.3])
+    pipeline = RAGPipeline(cfg, retriever, SpyGenerator(), threshold=0.5, chunks=chunks)
+
+    narrow = pipeline.answer(VACATION_Q, top_k=1)
+    default = pipeline.answer(VACATION_Q)
+    wide = pipeline.answer(VACATION_Q, top_k=5)
+
+    assert [len(a.contexts) for a in (narrow, default, wide)] == [1, 3, 5]
+    assert narrow.confidence == default.confidence == wide.confidence == 0.9
+    assert not narrow.abstained  # с порогом 0.5 по одному фрагменту (0.2) был бы отказ
+
+
 def test_confidence_is_none_without_scores(tmp_path: Path, mini_docs: list[Document]) -> None:
     pipeline = build_pipeline(make_cfg(tmp_path), mini_docs)
     contexts, _ = pipeline.retrieve(VACATION_Q)
