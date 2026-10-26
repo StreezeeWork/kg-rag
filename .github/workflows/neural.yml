@@ -54,8 +54,8 @@ jobs:
         run: pytest -m neural
 
       - name: Evaluate default config (quality gate)
-        # Тот же конфиг поиска, что hybrid_bm25_e5_rerank в сетке: recall@5 ≈ 0.93 на test
-        # (reports/grid_baseline). Порог — минус запас ~0.05, округлённый вниз до 0.05 → 0.85.
+        # Тот же конфиг поиска, что hybrid_bm25_e5_rerank в сетке: recall@5 ≈ 0.903 на test
+        # (docs/results/grid_neural.md). Порог — минус запас ~0.05, округлённый вниз до 0.05 → 0.85.
         run: kbrag eval --config configs/default.yaml --name neural_ci --fail-under recall@5=0.85
 
       - name: Upload reports
