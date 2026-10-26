@@ -12,6 +12,7 @@ import itertools
 import random
 
 import pytest
+from chunk_helpers import assert_chunk_invariants
 
 from kbrag.config import ChunkingConfig
 from kbrag.ingest import Chunker, FixedSizeChunker, RecursiveChunker, chunk_corpus, make_chunker
@@ -93,24 +94,6 @@ def _texts(chunks: list[Chunk]) -> list[str]:
 
 def _n_words(text: str) -> int:
     return len(word_spans(text))
-
-
-def assert_chunk_invariants(doc: Document, chunks: list[Chunk], chunk_size: int) -> None:
-    """Свойства, которые обязаны выполняться для любой стратегии и любого документа."""
-    previous_start = -1
-    for i, chunk in enumerate(chunks):
-        assert chunk.chunk_id == f"{doc.doc_id}::{i:03d}", "нумерация должна быть сквозной"
-        assert chunk.doc_id == doc.doc_id
-        assert chunk.title == doc.title
-        assert doc.text[chunk.start : chunk.end] == chunk.text, "текст фрагмента не совпадает со смещениями"
-        assert chunk.text, "пустой фрагмент"
-        assert chunk.text == chunk.text.strip(), "пробелы по краям фрагмента"
-        assert chunk.start > previous_start, "фрагменты должны идти по возрастанию start"
-        previous_start = chunk.start
-        assert _n_words(chunk.text) <= chunk_size, f"фрагмент длиннее {chunk_size} слов"
-        # Фрагмент не режет слово пополам: слева и справа от него — пробел или край текста.
-        assert chunk.start == 0 or doc.text[chunk.start - 1].isspace()
-        assert chunk.end == len(doc.text) or doc.text[chunk.end].isspace()
 
 
 # ---------------------------------------------------------------- общие инварианты

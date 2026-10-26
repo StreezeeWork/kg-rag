@@ -7,6 +7,7 @@ import types
 
 import numpy as np
 import pytest
+from chunk_helpers import paragraph_chunks
 
 from kbrag.config import AppConfig
 from kbrag.retrieval import (
@@ -17,27 +18,7 @@ from kbrag.retrieval import (
     SentenceTransformerEmbedder,
     build_retriever,
 )
-from kbrag.types import Chunk, Document
-
-
-def paragraph_chunks(docs: list[Document]) -> list[Chunk]:
-    """Фрагменты «по абзацам» без чанкера из ingest: строки-заголовки задают section."""
-    chunks: list[Chunk] = []
-    for doc in docs:
-        section, pos, number = "", 0, 0
-        for para in (p.strip() for p in doc.text.split("\n\n")):
-            if not para:
-                continue
-            start = doc.text.index(para, pos)
-            pos = start + len(para)
-            if para.startswith("#"):
-                section = para.lstrip("#").strip()
-                continue
-            chunks.append(
-                Chunk(f"{doc.doc_id}::{number:03d}", doc.doc_id, para, start, pos, doc.title, section)
-            )
-            number += 1
-    return chunks
+from kbrag.types import Document
 
 
 def config(**retrieval) -> AppConfig:

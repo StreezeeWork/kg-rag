@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from chunk_helpers import paragraph_chunks, plain_chunk
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from kbrag.config import DenseConfig
@@ -24,32 +25,6 @@ from kbrag.retrieval import (
 )
 from kbrag.retrieval.embeddings import l2_normalize, resolve_device
 from kbrag.types import Chunk, Document
-
-
-def paragraph_chunks(docs: list[Document]) -> list[Chunk]:
-    """Фрагменты «по абзацам» без чанкера из ingest: строки-заголовки задают section."""
-    chunks: list[Chunk] = []
-    for doc in docs:
-        section, pos, number = "", 0, 0
-        for para in (p.strip() for p in doc.text.split("\n\n")):
-            if not para:
-                continue
-            start = doc.text.index(para, pos)
-            pos = start + len(para)
-            if para.startswith("#"):
-                section = para.lstrip("#").strip()
-                continue
-            chunks.append(
-                Chunk(f"{doc.doc_id}::{number:03d}", doc.doc_id, para, start, pos, doc.title, section)
-            )
-            number += 1
-    return chunks
-
-
-def plain_chunk(chunk_id: str, text: str, title: str = "") -> Chunk:
-    return Chunk(
-        chunk_id=chunk_id, doc_id=chunk_id.split("::")[0], text=text, start=0, end=len(text), title=title
-    )
 
 
 class KeywordEmbedder(Embedder):
