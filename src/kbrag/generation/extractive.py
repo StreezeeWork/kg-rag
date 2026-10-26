@@ -25,6 +25,10 @@ _RANK_BONUS = 0.1
 _LINE_RE = re.compile(r"[^\n]+")
 _HEADING_RE = re.compile(r"^\s*#{1,6}(?:\s|$)")
 _LIST_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+# Номер раздела в заголовке («3.», «4.2») смысла не несёт: «Что запрещено», а не «3. Что запрещено».
+_HEADING_NUMBER_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s*")
+# Разделитель пути разделов в Chunk.section (см. ingest.chunking._SectionIndex).
+_SECTION_SEP = " > "
 _EMPHASIS_RE = re.compile(r"\*\*|__|`")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _SPACES_RE = re.compile(r"\s+")
@@ -88,29 +92,76 @@ class ExtractiveGenerator(Generator):
     def _candidates(self, question_stems: set[str], contexts: list[ScoredChunk]) -> list[_Candidate]:
         candidates: list[_Candidate] = []
         for rank, scored in enumerate(contexts, start=1):
-            for position, sentence in _sentences_without_headings(scored.chunk.text):
-                cleaned = clean_markdown(sentence)
-                if len(tokenize(cleaned)) < _MIN_SENTENCE_TOKENS:
+            chunk = scored.chunk
+            for position, sentence in _answer_sentences(chunk.text, chunk.section, chunk.title):
+                if len(tokenize(sentence)) < _MIN_SENTENCE_TOKENS:
                     continue
-                overlap = len(question_stems & set(analyze(cleaned)))
+                overlap = len(question_stems & set(analyze(sentence)))
                 if overlap < self.min_overlap:
                     continue
-                candidates.append(_Candidate(overlap + _RANK_BONUS / rank, rank, position, cleaned))
+                candidates.append(_Candidate(overlap + _RANK_BONUS / rank, rank, position, sentence))
         return candidates
 
 
-def _sentences_without_headings(text: str) -> list[tuple[int, str]]:
-    """Предложения фрагмента (со смещениями), кроме строк-заголовков ``#``.
+def _answer_sentences(text: str, section: str = "", title: str = "") -> list[tuple[int, str]]:
+    """Предложения фрагмента, пригодные для ответа: пары (смещение, очищенный текст).
 
-    Заголовки отсекаем по строкам *до* деления на предложения: иначе «## 2. Порядок
-    оформления отпуска» распалось бы на «## 2.» и «Порядок оформления отпуска», и вторая
-    часть прошла бы как обычное предложение. Заголовок — не ответ, хотя слова с вопросом
-    у него совпадают почти всегда.
+    Три правила, и у каждого своя причина.
+
+    1. Строки-заголовки ``#`` пропускаем. Отсекаем их по строкам *до* деления на предложения:
+       иначе «## 2. Порядок оформления отпуска» распалось бы на «## 2.» и «Порядок оформления
+       отпуска», и вторая часть прошла бы как обычное предложение. Заголовок — не ответ, хотя
+       слова с вопросом у него совпадают почти всегда.
+
+    2. Пункт списка — не самостоятельное предложение, а продолжение вводной фразы. Пункт
+       «- хранить секреты в репозиториях GitLab;» из раздела «## 3. Что запрещено», показанный
+       отдельно, читается как совет, то есть *противоположно* источнику. Поэтому пункт
+       склеиваем с его контекстом: с вводной фразой на «:» прямо перед списком, а если её нет —
+       с заголовком раздела («Что запрещено: хранить секреты…»). С этим контекстом пункт
+       и оценивается (слова вводной — часть его смысла), и попадает в ответ. Заголовок берём
+       из последней строки ``#`` внутри фрагмента, а если фрагмент начался посреди раздела —
+       из ``Chunk.section``.
+
+    3. Предложение на «:» («Если секрет попал в репозиторий или чат:») — вводная, а не ответ:
+       само по себе кандидатом не бывает, зато становится контекстом следующих пунктов.
     """
     sentences: list[tuple[int, str]] = []
+    heading = _heading_title(section.split(_SECTION_SEP)[-1], title)
+    lead_in: str | None = None  # вводная фраза на «:» перед текущим списком
     for line in _LINE_RE.finditer(text):
-        if _HEADING_RE.match(line.group()):
+        raw = line.group()
+        if _HEADING_RE.match(raw):
+            heading, lead_in = _heading_title(raw.strip().lstrip("#"), title), None
             continue
-        for start, end in split_sentences(line.group()):
-            sentences.append((line.start() + start, line.group()[start:end]))
+
+        # Маркер пункта («- », «1. ») снимаем ДО деления на предложения: иначе «1. Отзовите
+        # секрет» распалось бы на «1.» и «Отзовите секрет», и контекст достался бы не тому куску.
+        marker = _LIST_MARKER_RE.match(raw)
+        body_start = marker.end() if marker else 0
+        body = raw[body_start:]
+        context = (lead_in or heading) if marker else ""
+
+        last_sentence = ""
+        for i, (start, end) in enumerate(split_sentences(body)):
+            last_sentence = clean_markdown(body[start:end])
+            if last_sentence.endswith(":"):
+                continue
+            # Контекст нужен только первому предложению пункта: именно оно начинается с обрывка фразы.
+            sentence = f"{context}: {last_sentence}" if context and i == 0 else last_sentence
+            sentences.append((line.start() + body_start + start, sentence))
+
+        if not marker:
+            # Обычная строка: если она кончается на «:», это вводная к следующему списку.
+            lead_in = last_sentence.rstrip(":").strip() if last_sentence.endswith(":") else None
     return sentences
+
+
+def _heading_title(heading: str, doc_title: str = "") -> str:
+    """«## 3. Что запрещено» → «Что запрещено». Пустая строка — контекста нет.
+
+    Название самого документа контекстом не считаем: оно ничего не добавляет к смыслу пункта.
+    """
+    cleaned = _HEADING_NUMBER_RE.sub("", clean_markdown(heading.strip()))
+    if not any(char.isalnum() for char in cleaned) or normalize(cleaned) == normalize(doc_title):
+        return ""
+    return cleaned

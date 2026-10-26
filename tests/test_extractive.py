@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -159,6 +160,95 @@ def test_ties_are_broken_by_fragment_rank() -> None:
     contexts = [make_chunk("Отпуск согласует руководитель.", "b::000"), make_chunk("Отпуск оформляют заранее.", "a::000")]
     result = ExtractiveGenerator().generate("Что известно про отпуск?", contexts)
     assert result.text == "Отпуск согласует руководитель. [1] Отпуск оформляют заранее. [2]"
+
+
+# --- Пункты списка не отрываются от вводной фразы (иначе запрет читается как совет) ---
+
+
+def test_list_item_gets_section_heading_as_context() -> None:
+    chunk = make_chunk(
+        "## 4. Что запрещено\n\n"
+        "- устанавливать средства удалённого управления (TeamViewer, AnyDesk и аналоги);\n"
+        "- запускать программы для майнинга криптовалют."
+    )
+    text = ExtractiveGenerator().generate("Можно ли установить AnyDesk или TeamViewer?", [chunk]).text
+
+    assert text.startswith("Что запрещено: устанавливать средства удалённого управления")
+    assert "4." not in text  # номер раздела контекстом не считается
+
+
+def test_list_item_takes_heading_from_section_when_chunk_starts_mid_list() -> None:
+    # Фрагмент начался посреди списка: строки «## …» в нём нет, заголовок берём из Chunk.section.
+    text = "- устанавливать TeamViewer и AnyDesk на ноутбук;"
+    chunk = Chunk(
+        chunk_id="it::001",
+        doc_id="it",
+        text=text,
+        start=0,
+        end=len(text),
+        title="Установка ПО",
+        section="Правила > 4. Что запрещено",
+    )
+    context = ScoredChunk(chunk=chunk, score=1.0, source="bm25")
+    result = ExtractiveGenerator().generate("Можно ли установить AnyDesk?", [context])
+    assert result.text == "Что запрещено: устанавливать TeamViewer и AnyDesk на ноутбук; [1]"
+
+
+def test_list_item_prefers_lead_in_phrase_and_lead_in_is_not_an_answer() -> None:
+    chunk = make_chunk(
+        "## 5. Действия при утечке\n\n"
+        "Сканер блокирует MR. Если секрет попал в репозиторий или чат:\n\n"
+        "1. Немедленно отзовите и замените секрет в Vault.\n"
+        "2. Сообщите об утечке в службу ИБ."
+    )
+    text = ExtractiveGenerator().generate("Что делать, если секрет попал в чат?", [chunk]).text
+
+    lead_in = "Если секрет попал в репозиторий или чат"
+    assert f"{lead_in}: Немедленно отзовите и замените секрет в Vault. [1]" in text
+    assert f"{lead_in}: Сообщите об утечке в службу ИБ. [1]" in text
+    assert f"{lead_in}: [1]" not in text  # вводная сама по себе не ответ
+
+
+def test_lead_in_applies_only_to_the_list_right_after_it() -> None:
+    chunk = make_chunk(
+        "Порядок рассмотрения заявки:\n"
+        "1. Руководитель подтверждает заявку на программу.\n"
+        "После отказа заявку на программу можно подать через 3 месяца.\n"
+        "- Заявку на программу проверяет служба ИБ."
+    )
+    text = ExtractiveGenerator(max_sentences=3).generate("Как подать заявку на программу?", [chunk]).text
+
+    assert "Порядок рассмотрения заявки: Руководитель подтверждает" in text
+    assert "После отказа заявку" in text and "заявки: После" not in text
+    # Абзац между ними закрыл список: у второго списка вводной нет, а заголовка во фрагменте нет.
+    assert "Заявку на программу проверяет служба ИБ. [1]" in text
+
+
+def test_real_prohibition_is_never_shown_as_advice() -> None:
+    """Регрессия eng-028 / it-006 на настоящих документах: пункт из «Что запрещено» — только с контекстом."""
+    from kbrag.config import load_config
+    from kbrag.ingest import chunk_corpus, load_corpus, make_chunker
+
+    root = Path(__file__).resolve().parents[1]
+    docs = [d for d in load_corpus(root / "data" / "corpus") if d.doc_id in {"eng-secrets", "it-software"}]
+    chunks = chunk_corpus(docs, make_chunker(load_config(root / "configs" / "offline.yaml").chunking))
+    contexts = [ScoredChunk(chunk=chunk, score=1.0, source="bm25") for chunk in chunks]
+    generator = ExtractiveGenerator(max_sentences=len(chunks) * 10)  # смотрим на ВСЕ предложения-кандидаты
+
+    secret_question = "Что делать, если секрет случайно попал в репозиторий или в чат?"
+    anydesk_question = "Можно ли установить на корпоративный ноутбук AnyDesk или TeamViewer?"
+    for question, item in [
+        (secret_question, "хранить секреты в репозиториях"),
+        (anydesk_question, "устанавливать средства удалённого"),
+    ]:
+        text = generator.generate(question, contexts).text
+        assert item in text
+        assert f"Что запрещено: {item}" in text
+        assert text.count(item) == text.count(f"Что запрещено: {item}")
+
+    steps = generator.generate(secret_question, contexts).text
+    assert "Если секрет попал в репозиторий или чат: Немедленно отзовите" in steps
+    assert "Если секрет попал в репозиторий или чат: [" not in steps
 
 
 @pytest.mark.parametrize("kwargs", [{"max_sentences": 0}, {"min_overlap": 0}])
