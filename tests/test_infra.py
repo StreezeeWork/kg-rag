@@ -207,6 +207,28 @@ def test_env_template_stays_in_git() -> None:
     assert not git_ignores(".env.example")
 
 
+def test_every_dockerfile_copy_source_exists_in_git() -> None:
+    # Регрессия: `COPY pyproject.toml README.md ./` при отсутствующем README.md ломал сборку образа
+    # (и `pip install .`: pyproject ссылается на него как на readme), а локально этого никто не видел.
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    sources = [
+        source
+        for line in re.findall(r"^COPY\s+(?!--from)(.+)$", dockerfile, flags=re.MULTILINE)
+        for source in line.split()[:-1]  # последнее слово — куда копируем
+        if not source.startswith("--")
+    ]
+    assert sources, "в Dockerfile нет ни одного COPY"
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", *sources], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.split()
+    missing = [
+        s
+        for s in sources
+        if not any(t == s.rstrip("/") or t.startswith(s.rstrip("/") + "/") for t in tracked)
+    ]
+    assert not missing, f"COPY ссылается на файлы, которых нет в git: {missing}"
+
+
 def test_image_gets_corpus_and_calibration_but_not_gold() -> None:
     patterns = dockerignore_patterns()
     assert "data/eval" in patterns  # эталон сервису не нужен
