@@ -280,3 +280,23 @@ def test_onboarding_signs_nda_before_first_login(docs: dict[str, Document]) -> N
     )
     onboarding = docs["hr-onboarding"].text
     assert onboarding.index("обязательства о неразглашении") < onboarding.index("впервые войти")
+
+
+# Женские названия систем без родового слова после «в»/«через» не бывают в именительном падеже:
+# правильно «в «Казне»», «через «Казну»», «в «Волне»», «в «Орбите»» (норма — в DATASET.md).
+# С родовым словом название не склоняется: «в системе «Казна»», «в мессенджере «Волна»».
+_UNDECLINED_NAME_RE = re.compile(r"(?<![\w-])(?:в|через)\s+«(?:Казна|Волна|Орбита)»")
+
+
+def test_system_names_are_declined_consistently(docs: dict[str, Document]) -> None:
+    """Корпус писали «разные авторы»: HR и финансы не склоняли названия, ИТ и инженеры — склоняли.
+
+    Для поиска разница почти незаметна (стеммер сводит формы), но корпус, собранный
+    «из разных рук», выглядит неряшливо, а DATASET.md требует единых названий.
+    """
+    offenders = {
+        doc_id: _UNDECLINED_NAME_RE.findall(doc.text)
+        for doc_id, doc in docs.items()
+        if _UNDECLINED_NAME_RE.search(doc.text)
+    }
+    assert offenders == {}
