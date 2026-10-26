@@ -88,6 +88,20 @@ def test_gold_file_is_valid_and_built_from_parts(docs: dict[str, Document], item
     assert gold == assign_splits(items), "gold.jsonl устарел: запустите `kbrag build-gold`"
 
 
+def test_enough_unanswerable_questions_for_abstention(items: list[GoldItem]) -> None:
+    """Порог отказа подбирается на dev, а Abstention F1 считается на test — нужны оба.
+
+    При 7 неотвечаемых в dev и 15 в test один вопрос сдвигал порог и F1 на несколько пунктов,
+    поэтому набор расширен «почти попаданиями»: вопросами по теме документов, на которые
+    в базе ответа нет (лимит ДМС на офтальмологию рядом с лимитом на стоматологию и т. п.).
+    """
+    unanswerable = [item for item in assign_splits(items) if not item.answerable]
+    assert sum(item.split == "dev" for item in unanswerable) >= 15
+    assert sum(item.split == "test" for item in unanswerable) >= 35
+    questions = [item.question for item in unanswerable]
+    assert len(set(questions)) == len(questions), "повторяющиеся неотвечаемые вопросы"
+
+
 # ---------------------------------------------------------------------------
 # Типы вопросов соответствуют определениям из DATASET.md
 # ---------------------------------------------------------------------------
@@ -95,8 +109,8 @@ def test_gold_file_is_valid_and_built_from_parts(docs: dict[str, Document], item
 # Автоматически по всем multi_hop эту проверку не запустить: лексическое сравнение даёт ложные
 # срабатывания («15:00» есть и в правилах обеда, и в правилах доступа в офис). Поэтому
 # проверяем вопросы, которые были ошибочно размечены как multi_hop и исправлены, —
-# и всё, что добавляется в этот список при написании новых multi_hop.
-MULTI_HOP_CHECKED = ["it-039", "x-001", "x-007", "x-009"]
+# и всё, что добавляется в этот список при написании новых multi_hop (x-041…x-043 — из трёх документов).
+MULTI_HOP_CHECKED = ["it-039", "x-001", "x-007", "x-009", "x-041", "x-042", "x-043"]
 
 
 @pytest.mark.parametrize("qid", MULTI_HOP_CHECKED)
