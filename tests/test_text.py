@@ -39,6 +39,12 @@ def test_normalize_applies_nfkc() -> None:
     assert normalize("１２ ﬁle") == "12 file"
 
 
+def test_normalize_drops_number_sign() -> None:
+    # Регрессия: NFKC превращал «№» в латинское «no», и в тексте появлялось слово «no».
+    assert normalize("Приказ № 14-П") == "приказ 14-п"
+    assert tokenize("договор №ПП-2025/0417") == ["договор", "пп-2025", "0417"]
+
+
 def test_normalize_empty() -> None:
     assert normalize("") == ""
     assert normalize(" \n\t ") == ""
@@ -167,6 +173,35 @@ def test_stopwords_are_lowercase() -> None:
     assert all(word == word.lower() for word in STOPWORDS)
 
 
+@pytest.mark.parametrize(
+    "word",
+    ["один", "одна", "два", "две", "три", "четыре", "пять", "раз", "нет", "можно", "нельзя", "надо", "может"]
+    + ["более", "менее", "больше", "меньше", "лучше"],
+)
+def test_fact_words_are_not_stopwords(word: str) -> None:
+    # Регрессия: из списка NLTK в стоп-словах были «один», «два», «три», «нельзя», «более»…,
+    # но не «две», «четыре», «менее». В базе знаний такие слова и есть факт.
+    assert word not in STOPWORDS
+
+
+def test_numerals_are_treated_alike() -> None:
+    # Раньше «три» выбрасывалось как стоп-слово, а «пять» — нет.
+    assert analyze("три дня") == [stem("три"), stem("дня")]
+    assert analyze("пять дней") == [stem("пять"), stem("дней")]
+
+
+def test_comparisons_are_kept() -> None:
+    # «не более 6 часов» и «не менее 6 часов» — противоположные факты, их термы должны различаться.
+    assert analyze("не более 6 часов") != analyze("не менее 6 часов")
+    assert analyze("можно") != analyze("нельзя") != []
+
+
+def test_compound_prepositions_are_stopwords() -> None:
+    # Токенизатор держит «из-за» целиком; без записи в стоп-словах оно становилось термом «из-з».
+    assert analyze("из-за болезни") == [stem("болезни")]
+    assert analyze("из-под стола") == [stem("стола")]
+
+
 # ---------------------------------------------------------------- word_spans
 
 
@@ -223,6 +258,28 @@ def test_split_sentences_keeps_address_abbreviations() -> None:
     assert [text[a:b] for a, b in split_sentences(text)] == [
         "Офис находится на ул. Облачная, д. 7.",
         "Пропуск выдаёт охрана.",
+    ]
+
+
+def test_split_sentences_keeps_reference_abbreviations() -> None:
+    # Регрессия: «См. п. 3. Подробности ниже.» резалось на «См. п.» | «3.» | «Подробности ниже.».
+    text = "См. п. 3. Подробности ниже."
+    assert [text[a:b] for a, b in split_sentences(text)] == ["См. п. 3.", "Подробности ниже."]
+    text = "Основание — ст. 81 ТК РФ. Схема на рис. 2 и в табл. 1. Далее."
+    assert [text[a:b] for a, b in split_sentences(text)] == [
+        "Основание — ст. 81 ТК РФ.",
+        "Схема на рис. 2 и в табл. 1.",
+        "Далее.",
+    ]
+
+
+def test_split_sentences_known_tradeoff_after_td_and_year() -> None:
+    # Осознанный компромисс (см. комментарий к _ABBREVIATIONS): после «т. д.» и «г.» граница
+    # не ставится, даже если предложение там действительно кончается.
+    text = "Ноутбук, монитор и т. д. Далее идёт список. Введено в 2023 г. Новый абзац."
+    assert [text[a:b] for a, b in split_sentences(text)] == [
+        "Ноутбук, монитор и т. д. Далее идёт список.",
+        "Введено в 2023 г. Новый абзац.",
     ]
 
 
