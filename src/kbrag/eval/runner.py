@@ -91,6 +91,7 @@ def run_experiment(
     ``gold`` и ``docs`` можно передать готовыми (тесты, сетка экспериментов на одном корпусе);
     иначе они читаются из ``cfg.gold_path`` и ``cfg.corpus_dir``.
     """
+    _reject_unsupported_judge(cfg)
     docs = list(docs) if docs is not None else load_corpus(cfg.corpus_dir)
     gold = list(gold) if gold is not None else load_gold(cfg.gold_path)
     _check_gold(gold, docs)
@@ -148,6 +149,22 @@ class _QuestionRun:
     item: GoldItem
     answer: Answer
     retrieved_ids: list[str] = field(default_factory=list)
+
+
+def _reject_unsupported_judge(cfg: AppConfig) -> None:
+    """``eval.judge.enabled: true`` → понятная ошибка вместо тихо проигнорированного флага.
+
+    LLM-судья (``kbrag.eval.judge``) пока библиотечный модуль: прогон его не вызывает.
+    Если молча продолжить, в отчёте не будет оценок судьи, а в ``results.json`` при этом
+    останется ``judge.enabled: true`` — читатель решит, что судья отработал. Это та же
+    логика, что у строгих конфигов: настройка либо работает, либо падает (см. ``config._Strict``).
+    """
+    if cfg.eval.judge.enabled:
+        raise ValueError(
+            "eval.judge.enabled=true, но LLM-судья пока не подключён к `kbrag eval` / `kbrag grid`: "
+            "оценки faithfulness/correctness в отчёт не попали бы. Выключите флаг и вызывайте "
+            "kbrag.eval.judge.LLMJudge отдельно, на сохранённых ответах из per_question."
+        )
 
 
 def _check_gold(gold: Sequence[GoldItem], docs: Sequence[Document]) -> None:

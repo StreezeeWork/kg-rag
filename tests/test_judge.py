@@ -243,3 +243,30 @@ def test_cohen_kappa_invalid_input() -> None:
         cohen_kappa([1, 2], [1])
     with pytest.raises(ValueError):
         cohen_kappa([], [])
+
+
+@pytest.mark.parametrize("weights", ["linear", "quadratic"])
+def test_weighted_cohen_kappa_matches_sklearn(weights: str) -> None:
+    human = [5, 4, 4, 3, 1, 2, 5, 5, 3, 4, 2, 1]
+    judge = [5, 4, 3, 3, 1, 1, 5, 4, 3, 4, 2, 2]
+    expected = cohen_kappa_score(human, judge, labels=[1, 2, 3, 4, 5], weights=weights)
+    assert cohen_kappa(human, judge, weights=weights) == pytest.approx(expected)
+
+
+def test_weighted_kappa_penalizes_near_misses_less_than_far_misses() -> None:
+    # Регрессия: невзвешенная каппа не отличала «4 против 5» от «1 против 5» на шкале 1–5.
+    # Частоты оценок у near и far одинаковые, совпадений тоже поровну (8 из 10) — различается
+    # только величина промахов: near меняет местами 5 и 4, far — 5 и 1.
+    human = [5, 4, 3, 2, 1, 5, 4, 3, 2, 1]
+    near = [4, 5, 3, 2, 1, 5, 4, 3, 2, 1]
+    far = [1, 4, 3, 2, 5, 5, 4, 3, 2, 1]
+    assert cohen_kappa(human, near) == pytest.approx(cohen_kappa(human, far))
+    assert cohen_kappa(human, near, weights="quadratic") > cohen_kappa(human, far, weights="quadratic")
+
+
+def test_weighted_kappa_invalid_input() -> None:
+    assert cohen_kappa([3, 3], [3, 3], weights="quadratic") == 1.0
+    with pytest.raises(ValueError, match="weights"):
+        cohen_kappa([1, 2], [1, 2], weights="cubic")
+    with pytest.raises(ValueError, match="числовых"):
+        cohen_kappa(["да", "нет"], ["да", "да"], weights="linear")

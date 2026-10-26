@@ -131,6 +131,18 @@ def test_broken_gold_fails_before_indexing(
     assert index_calls == []
 
 
+def test_enabled_judge_fails_loudly_instead_of_being_ignored(
+    gold: list[GoldItem], mini_docs: list[Document], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Регрессия: eval.judge.enabled=true молча игнорировался, а results.json показывал «включён».
+    index_calls: list[int] = []
+    monkeypatch.setattr(BM25Retriever, "index", lambda self, chunks: index_calls.append(len(chunks)))
+
+    with pytest.raises(ValueError, match="судья пока не подключён"):
+        run_experiment(make_cfg(eval={"judge": {"enabled": True}}), gold=gold, docs=mini_docs)
+    assert index_calls == []  # падаем до построения индекса
+
+
 def test_one_index_per_experiment(
     gold: list[GoldItem], mini_docs: list[Document], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -5,8 +5,15 @@
 
 * оценки строго валидируются (целое 1–5), а не «как-нибудь» парсятся;
 * разбор JSON устойчив к типичному мусору модели (markdown-блок, текст вокруг);
-* согласие судьи с человеком проверяется через ``cohen_kappa`` — если оно низкое,
-  оценкам судьи нельзя доверять.
+* согласие судьи с человеком проверяется через ``cohen_kappa`` (для шкалы 1–5 —
+  ``weights="quadratic"``) — если оно низкое, оценкам судьи нельзя доверять. Для этого
+  нужна небольшая ручная разметка (30–50 ответов); в проекте её пока нет, поэтому
+  оценки судьи нельзя выдавать за проверенные.
+
+Судья пока библиотечный модуль: ``kbrag eval`` / ``kbrag grid`` его не вызывают, а флаг
+``eval.judge.enabled: true`` даёт понятную ошибку (см. ``runner._reject_unsupported_judge``).
+Подключая судью, передавайте ему те же очищенные фрагменты (после ``sanitize_contexts``),
+что видел генератор: обоснованность проверяется относительно реального контекста ответа.
 
 Клиент — любой объект с методом ``chat(messages, temperature=..., max_tokens=...,
 response_format=...)``, возвращающий объект с полем ``text``
@@ -252,7 +259,7 @@ class LLMJudge:
 # ---------------------------------------------------------------------------
 
 
-def cohen_kappa(a: Sequence[Hashable], b: Sequence[Hashable]) -> float:
+def cohen_kappa(a: Sequence[Hashable], b: Sequence[Hashable], weights: str | None = None) -> float:
     """Каппа Коэна: согласие двух разметчиков с поправкой на случайное совпадение.
 
     ``kappa = (p_o - p_e) / (1 - p_e)``, где ``p_o`` — доля совпавших оценок,
@@ -260,11 +267,20 @@ def cohen_kappa(a: Sequence[Hashable], b: Sequence[Hashable]) -> float:
     1 — полное согласие, 0 — не лучше случайного, < 0 — хуже случайного.
     Простая доля совпадений обманчива: если оба почти всегда ставят «5»,
     они совпадут в 90% случаев, ничего не понимая в ответах.
+
+    ``weights`` — для порядковой шкалы (оценки судьи 1–5): ``"linear"`` или ``"quadratic"``.
+    Невзвешенная каппа считает «4 против 5» такой же ошибкой, как «1 против 5»; взвешенная
+    штрафует расхождение пропорционально расстоянию (или его квадрату) между оценками.
+    Для шкалы 1–5 обычно берут ``"quadratic"``. Совпадает с
+    ``sklearn.metrics.cohen_kappa_score(a, b, labels=..., weights=...)``, если ``labels`` —
+    все значения шкалы подряд.
     """
     if len(a) != len(b):
         raise ValueError("последовательности оценок должны быть одной длины")
     if not a:
         raise ValueError("нужна хотя бы одна пара оценок")
+    if weights is not None:
+        return _weighted_kappa(a, b, weights)
     n = len(a)
     observed = sum(1 for x, y in zip(a, b, strict=True) if x == y) / n
     counts_a = Counter(a)
@@ -274,3 +290,27 @@ def cohen_kappa(a: Sequence[Hashable], b: Sequence[Hashable]) -> float:
         # Оба всегда ставят одну и ту же оценку: формула даёт 0/0. Согласие при этом полное.
         return 1.0
     return (observed - expected) / (1 - expected)
+
+
+def _weighted_kappa(a: Sequence[Hashable], b: Sequence[Hashable], weights: str) -> float:
+    """``kappa_w = 1 - Σ w·O / Σ w·E``: O — наблюдаемые пары оценок, E — ожидаемые случайно.
+
+    Вес пары — расстояние между оценками (``linear``) или его квадрат (``quadratic``);
+    совпадение весит 0. Расстояние берётся по самим числам, поэтому оценки должны быть числами.
+    """
+    if weights not in ("linear", "quadratic"):
+        raise ValueError(f"weights должен быть None, 'linear' или 'quadratic', получено {weights!r}")
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (*a, *b)):
+        raise ValueError("взвешенная каппа определена только для числовых (порядковых) оценок")
+    n = len(a)
+    power = 1 if weights == "linear" else 2
+    counts_a = Counter(a)
+    counts_b = Counter(b)
+    observed = sum(abs(x - y) ** power for x, y in zip(a, b, strict=True)) / n
+    expected = sum(counts_a[x] * counts_b[y] * abs(x - y) ** power for x in counts_a for y in counts_b) / (
+        n * n
+    )
+    if expected == 0:
+        # Оба всегда ставят одну и ту же оценку — расхождений нет ни в данных, ни «случайно».
+        return 1.0
+    return 1 - observed / expected
