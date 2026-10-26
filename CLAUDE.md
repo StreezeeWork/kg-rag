@@ -25,4 +25,6 @@
   отдельное окружение `.venv-llm` (CUDA-сборка torch), запуск — `scripts/serve_local_llm.py`.
 - Модели HuggingFace лежат в `D:\workspace\.cache\huggingface` (переменная `HF_HOME`);
   кэш pip — `D:\workspace\.cache\pip`. На диске C мало места — ничего крупного туда не класть.
-- Отчёты (`reports/`) в git не попадают; итоговые цифры переносятся в README.
+- Черновики прогонов (`reports/`) в git не попадают — кроме калибровки порога отказа
+  `reports/calibration*.json` (её читает сервис; свежесть проверяет CI). Эталонные результаты сетки
+  лежат в `docs/results/`, итоговые цифры — в README.
