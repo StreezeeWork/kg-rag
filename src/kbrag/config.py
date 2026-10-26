@@ -157,6 +157,10 @@ _ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "KBRAG_GENERATION_BACKEND": ("generation", "backend"),
     "KBRAG_LLM_BASE_URL": ("generation", "base_url"),
     "KBRAG_LLM_MODEL": ("generation", "model"),
+    # Медленной локальной модели (4 бита на слабой видеокарте) нужны другие лимиты, чем vLLM на A100;
+    # переменные позволяют поднять их, не копируя YAML.
+    "KBRAG_LLM_TIMEOUT_S": ("generation", "timeout_s"),
+    "KBRAG_LLM_MAX_TOKENS": ("generation", "max_tokens"),
     "KBRAG_CORPUS_DIR": ("corpus_dir",),
 }
 

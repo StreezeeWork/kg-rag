@@ -304,6 +304,18 @@ def test_env_beats_overrides_and_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.generation.model == "qwen-from-env"
 
 
+def test_llm_limits_can_be_raised_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Медленная локальная модель: лимиты поднимаются переменными, YAML не копируется.
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setenv("KBRAG_LLM_TIMEOUT_S", "180")
+    monkeypatch.setenv("KBRAG_LLM_MAX_TOKENS", "256")
+
+    cfg = load_config("configs/default.yaml")
+
+    assert cfg.generation.timeout_s == 180.0
+    assert cfg.generation.max_tokens == 256
+
+
 def test_empty_env_value_keeps_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
     # docker-compose передаёт `${KBRAG_GENERATION_BACKEND:-}` пустой строкой — это «не задано».
     monkeypatch.chdir(ROOT)
