@@ -35,6 +35,12 @@ _HEADING_NUMBER_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s*")
 # Разделитель пути разделов в Chunk.section (см. ingest.chunking._SectionIndex).
 _SECTION_SEP = " > "
 _EMPHASIS_RE = re.compile(r"\*\*|__|`")
+# Вопрос явно про старую редакцию: год до 2025, «архивная», «прежняя», «раньше», «старая редакция»…
+# Тогда архивные документы — законный источник ответа; иначе цитировать их нельзя.
+_OLD_EDITION_RE = re.compile(
+    r"\b(?:20(?:1\d|2[0-4])|архив\w*|прежн\w*|предыдущ\w*|раньше|ранее|утратил\w*|устаревш\w*)\b"
+    r"|\b(?:стар|прошл)(?:ая|ой|ую|ые|ых|ого|ом|ое|ый|ым)\s+(?:редакц|верси|правил|политик)\w*"
+)
 _LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _SPACES_RE = re.compile(r"\s+")
 
@@ -65,9 +71,14 @@ class ExtractiveGenerator(Generator):
     Score предложения — число общих с вопросом стемов плюс маленький бонус за ранг фрагмента.
     В ответ идут лучшие предложения, но не слабее половины лучшего (``_RELATIVE_CUTOFF``).
 
+    Архивные редакции: если среди фрагментов есть действующие (``status: active``), а вопрос
+    не про старую редакцию (см. ``asks_about_old_edition``), архивные фрагменты не цитируются —
+    иначе ответ смешивал бы «до 3 дней» из действующей политики и «не более 2 дней» из архива.
+    Если найдены только архивные фрагменты, отвечаем по ним: это лучше, чем отказ.
+
     Известные ограничения бейзлайна (их и закрывает LLM-режим): слова не взвешены по редкости
-    («дней» весит столько же, сколько «календарных»), конфликт действующей и архивной редакции
-    не разрешается, а предложение с местоимением («Он регистрирует…») выводится без антецедента.
+    («дней» весит столько же, сколько «календарных»), а предложение с местоимением
+    («Он регистрирует…») выводится без антецедента.
     """
 
     name = "extractive"
@@ -82,7 +93,8 @@ class ExtractiveGenerator(Generator):
 
     def generate(self, question: str, contexts: list[ScoredChunk]) -> GenerationResult:
         question_stems = set(analyze(question))
-        candidates = self._candidates(question_stems, contexts) if question_stems else []
+        skip_ranks = archived_ranks_to_skip(question, contexts)
+        candidates = self._candidates(question_stems, contexts, skip_ranks) if question_stems else []
         if not candidates:
             return GenerationResult(text=ABSTAIN_TEXT, abstained=True)
 
@@ -105,9 +117,13 @@ class ExtractiveGenerator(Generator):
         answer = " ".join(f"{c.text} [{c.rank}]" for c in chosen)
         return GenerationResult(text=answer, abstained=False, raw=answer)
 
-    def _candidates(self, question_stems: set[str], contexts: list[ScoredChunk]) -> list[_Candidate]:
+    def _candidates(
+        self, question_stems: set[str], contexts: list[ScoredChunk], skip_ranks: set[int]
+    ) -> list[_Candidate]:
         candidates: list[_Candidate] = []
         for rank, scored in enumerate(contexts, start=1):
+            if rank in skip_ranks:
+                continue
             chunk = scored.chunk
             for position, sentence in _answer_sentences(chunk.text, chunk.section, chunk.title):
                 if len(tokenize(sentence)) < _MIN_SENTENCE_TOKENS:
@@ -117,6 +133,27 @@ class ExtractiveGenerator(Generator):
                     continue
                 candidates.append(_Candidate(overlap + _RANK_BONUS / rank, rank, position, sentence))
         return candidates
+
+
+def asks_about_old_edition(question: str) -> bool:
+    """Спрашивает ли вопрос про прежнюю редакцию правил («как было в 2023 году?», «раньше»)."""
+    return bool(_OLD_EDITION_RE.search(normalize(question)))
+
+
+def archived_ranks_to_skip(question: str, contexts: list[ScoredChunk]) -> set[int]:
+    """Номера (1-based) архивных фрагментов, которые нельзя цитировать в ответе на этот вопрос.
+
+    Номера, а не новый список: ссылка ``[n]`` обязана указывать на n-й фрагмент того контекста,
+    который видел генератор, поэтому порядок фрагментов менять нельзя.
+    """
+    if asks_about_old_edition(question):
+        return set()
+    archived = {
+        rank
+        for rank, scored in enumerate(contexts, start=1)
+        if scored.chunk.metadata.get("status") == "archived"
+    }
+    return set() if len(archived) == len(contexts) else archived
 
 
 def _answer_sentences(text: str, section: str = "", title: str = "") -> list[tuple[int, str]]:

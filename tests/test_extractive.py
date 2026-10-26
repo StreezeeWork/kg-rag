@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from kbrag.generation.base import GenerationResult, Generator
-from kbrag.generation.extractive import ExtractiveGenerator, clean_markdown
+from kbrag.generation.extractive import ExtractiveGenerator, asks_about_old_edition, clean_markdown
 from kbrag.generation.prompts import ABSTAIN_TEXT
 from kbrag.types import Chunk, Document, ScoredChunk
 
@@ -300,3 +300,55 @@ def test_invalid_parameters_are_rejected(kwargs: dict[str, int]) -> None:
 )
 def test_clean_markdown(raw: str, expected: str) -> None:
     assert clean_markdown(raw) == expected
+
+
+REMOTE_QUESTION = "Сколько дней в неделю можно работать удалённо?"
+
+
+@pytest.fixture()
+def remote_contexts(mini_docs: list[Document]) -> list[ScoredChunk]:
+    # Архивная редакция нарочно стоит первой: правило не должно зависеть от порядка выдачи.
+    return [
+        make_context(mini_docs, "hr-remote-2023", "не более 2 дней"),
+        make_context(mini_docs, "hr-remote-2025", "до 3 дней"),
+    ]
+
+
+def test_archived_version_is_not_cited_when_active_one_is_found(remote_contexts: list[ScoredChunk]) -> None:
+    answer = ExtractiveGenerator().generate(REMOTE_QUESTION, remote_contexts).text
+    assert "до 3 дней" in answer
+    assert "2 дней" not in answer
+    # Ссылка указывает на позицию фрагмента в исходном контексте: действующая редакция — [2].
+    assert set(_CITATION_RE.findall(answer)) == {"[2]"}
+
+
+def test_archived_version_is_used_when_question_asks_about_it(remote_contexts: list[ScoredChunk]) -> None:
+    answer = (
+        ExtractiveGenerator()
+        .generate("Сколько дней удалённой работы в неделю разрешала редакция 2023 года?", remote_contexts)
+        .text
+    )
+    assert "не более 2 дней" in answer
+
+
+def test_only_archived_contexts_still_give_an_answer(remote_contexts: list[ScoredChunk]) -> None:
+    result = ExtractiveGenerator().generate(REMOTE_QUESTION, remote_contexts[:1])
+    assert not result.abstained
+    assert "не более 2 дней" in result.text
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("Как было в 2023 году?", True),
+        ("Что говорила архивная редакция?", True),
+        ("Сколько дней давали раньше?", True),
+        ("Чем новые правила отличаются от прежних?", True),
+        ("Что было в старой редакции политики?", True),
+        ("Сколько дней ежегодного отпуска?", False),
+        ("Когда старт квартальной премии?", False),
+        ("Как сдать отчёт за 2025 год?", False),
+    ],
+)
+def test_asks_about_old_edition(question: str, expected: bool) -> None:
+    assert asks_about_old_edition(question) is expected

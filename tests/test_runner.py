@@ -27,7 +27,7 @@ from kbrag.eval.results import (
     retrieval_metric_names,
 )
 from kbrag.eval.runner import load_experiments, run_experiment, run_grid
-from kbrag.generation import ABSTAIN_TEXT
+from kbrag.generation import ABSTAIN_TEXT, extractive
 from kbrag.pipeline import LOW_CONFIDENCE_FLAG, RAGPipeline
 from kbrag.retrieval import BM25Retriever
 from kbrag.types import Document
@@ -179,10 +179,13 @@ def test_one_index_per_experiment(
 
 
 def test_confusable_answer_citing_archived_version_is_flagged(
-    gold: list[GoldItem], mini_docs: list[Document]
+    gold: list[GoldItem], mini_docs: list[Document], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Регрессия: ответ на confusable-вопрос t-003 смешивает архивную редакцию («не более 2 дней»)
-    # с действующей («до 3 дней»), а Recall@5 и fact_recall ставили 1.0 без всякого сигнала.
+    # Регрессия метрики: ответ на confusable-вопрос t-003, смешивающий архивную редакцию
+    # («не более 2 дней») с действующей («до 3 дней»), раньше получал Recall@5 и fact_recall 1.0
+    # без всякого сигнала. Генератор теперь архив не цитирует, поэтому старое поведение
+    # (цитировать всё подряд) воспроизводим подменой правила.
+    monkeypatch.setattr(extractive, "archived_ranks_to_skip", lambda question, contexts: set())
     result = run_experiment(make_cfg(), gold=gold, docs=mini_docs)
     rows = rows_by_qid(result)
 
@@ -191,6 +194,16 @@ def test_confusable_answer_citing_archived_version_is_flagged(
     assert rows["t-001"]["stale_citation_rate"] == 0.0
     assert rows["t-005"]["stale_citation_rate"] is None  # неотвечаемый вопрос
     assert result.metrics["by_type"]["confusable"]["stale_citation_rate"] == 1.0
+
+
+def test_extractive_answer_to_confusable_question_cites_only_active_version(
+    gold: list[GoldItem], mini_docs: list[Document]
+) -> None:
+    # Регрессия генератора: при найденной действующей редакции архивная в ответ не попадает.
+    rows = rows_by_qid(run_experiment(make_cfg(), gold=gold, docs=mini_docs))
+    assert rows["t-003"]["stale_citation_rate"] == 0.0
+    assert rows["t-003"]["fact_recall"] == 1.0
+    assert "2 дней" not in rows["t-003"]["answer"]
 
 
 def test_answer_without_citations_gets_zero_citation_precision(
