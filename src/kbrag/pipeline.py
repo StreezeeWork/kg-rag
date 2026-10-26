@@ -125,7 +125,13 @@ def load_calibration(cfg: AppConfig) -> float | None:
     """
     path = _calibration_path(cfg)
     if path is None or not path.is_file():
-        logger.info("Файл калибровки %s не найден: отказ по порогу уверенности выключен", path)
+        # WARNING, а не INFO: поведение сервиса меняется (он перестаёт отказываться по порогу),
+        # и об этом должно быть видно в `docker logs` даже при уровне логов по умолчанию.
+        logger.warning(
+            "Файл калибровки %s не найден: отказ по порогу уверенности выключен "
+            "(подберите порог: kbrag eval --save-calibration)",
+            path,
+        )
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))

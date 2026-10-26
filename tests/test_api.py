@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 import threading
 from pathlib import Path
 
@@ -17,21 +19,26 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from kbrag.api.app import (
+    INDEX_HTML,
     LATENCY_BUCKETS_MS,
+    MAX_BODY_BYTES,
     AskResponse,
     ServiceMetrics,
+    _configure_service_logging,
+    build_ask_response,
     config_from_env,
     count_injection_flags,
     create_app,
 )
 from kbrag.config import AppConfig
 from kbrag.generation import LLMError
+from kbrag.generation.citations import CITATION_RE
 from kbrag.pipeline import RAGPipeline
 from kbrag.types import Answer, Chunk, Citation, Document, ScoredChunk
 
 RESPONSE_FIELDS = {"answer", "abstained", "confidence", "citations", "contexts", "timings_ms", "flags"}
-CITATION_FIELDS = {"index", "chunk_id", "doc_id", "title"}
-CONTEXT_FIELDS = {"index", "chunk_id", "doc_id", "title", "section", "score", "text"}
+CITATION_FIELDS = {"index", "context_index", "chunk_id", "doc_id", "title"}
+CONTEXT_FIELDS = {"index", "chunk_id", "doc_id", "title", "section", "score", "confidence_score", "text"}
 ASK_REQUESTS = 'kbrag_requests_total{endpoint="/ask",status="%s"}'
 
 
@@ -132,7 +139,13 @@ def test_ask_returns_exactly_the_fields_the_web_page_uses(client: TestClient, fa
     assert body["abstained"] is False
     assert body["confidence"] == pytest.approx(0.42)
     assert body["citations"] == [
-        {"index": 1, "chunk_id": "hr-vacation::000", "doc_id": "hr-vacation", "title": "Документ hr-vacation"}
+        {
+            "index": 1,
+            "context_index": 1,
+            "chunk_id": "hr-vacation::000",
+            "doc_id": "hr-vacation",
+            "title": "Документ hr-vacation",
+        }
     ]
     assert all(set(ctx) == CONTEXT_FIELDS for ctx in body["contexts"])
     # Нумерация с 1 — так же, как ссылки [n] в тексте ответа.
@@ -250,6 +263,106 @@ def test_index_page_leaves_top_k_to_the_server_by_default(client: TestClient) ->
     page = client.get("/").text
     top_k_input = next(line for line in page.splitlines() if 'id="top-k"' in line)
     assert "value=" not in top_k_input
+
+
+def test_citation_reports_its_position_in_contexts_and_confidence_scores_are_exposed() -> None:
+    # После guardrails (drop_chunk) генератор видит не все фрагменты: [1] в ответе — это второй
+    # фрагмент выдачи. Клиенту не нужно сверять это самому по chunk_id.
+    answer = make_answer()
+    answer.citations = [Citation(index=1, chunk_id="it-vpn::001", doc_id="it-vpn", title="Документ it-vpn")]
+
+    response = build_ask_response(answer, score_source="bm25")
+
+    assert response.citations[0].index == 1 and response.citations[0].context_index == 2
+    # score — с последнего этапа поиска, confidence_score — тот компонент, по которому считается уверенность.
+    assert [c.confidence_score for c in response.contexts] == [pytest.approx(6.5), pytest.approx(1.25)]
+    assert build_ask_response(answer).contexts[0].confidence_score is None
+
+
+def test_page_citation_regex_matches_the_server_one() -> None:
+    # Страница сама размечает [n] в тексте ответа; её регулярка обязана понимать те же форматы,
+    # что parse_citations на сервере ([3; 1], [ 2 ]), иначе такие ссылки показываются простым текстом.
+    page = INDEX_HTML.read_text(encoding="utf-8")
+    js_pattern = re.search(r"const CITATION_RE = /(.+)/g;", page).group(1)
+    assert js_pattern == CITATION_RE.pattern
+
+
+# ---------------------------------------------------------------------------
+# Защита сервиса: размер тела, Host, заголовки, ответ 422
+# ---------------------------------------------------------------------------
+
+
+def test_too_large_body_is_rejected_with_413_and_counted(client: TestClient, fake: FakePipeline) -> None:
+    big = '{"question": "' + "а" * (MAX_BODY_BYTES) + '"}'
+    by_length = client.post("/ask", content=big.encode("utf-8"), headers={"Content-Type": "application/json"})
+
+    def chunks():  # без Content-Length (chunked): размер считается по пришедшим байтам
+        yield b'{"question": "'
+        for _ in range(4):
+            yield ("я" * MAX_BODY_BYTES).encode("utf-8")
+        yield b'"}'
+
+    streamed = client.post("/ask", content=chunks(), headers={"Content-Type": "application/json"})
+
+    assert by_length.status_code == 413 and streamed.status_code == 413
+    assert "detail" in by_length.json() and "detail" in streamed.json()
+    assert fake.calls == []
+    assert metric_value(client.get("/metrics").text, ASK_REQUESTS % 413) == 2
+
+
+def test_validation_error_does_not_echo_the_input(client: TestClient) -> None:
+    response = client.post("/ask", json={"question": "Вопрос", "extra": "<script>alert(1)</script>"})
+    too_long = client.post("/ask", json={"question": "секрет " * 300})
+
+    assert response.status_code == 422 and too_long.status_code == 422
+    assert "<script>" not in response.text and "секрет" not in too_long.text
+    detail = response.json()["detail"]
+    assert detail and set(detail[0]) == {"loc", "msg", "type"}
+
+
+def test_unknown_host_header_is_rejected(client: TestClient) -> None:
+    # Защита от DNS rebinding: страница злоумышленника не сможет читать локальный сервис.
+    assert client.get("/health", headers={"host": "attacker.example"}).status_code == 400
+    assert client.get("/health", headers={"host": "localhost:8080"}).status_code == 200
+
+
+def test_allowed_hosts_come_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KBRAG_ALLOWED_HOSTS", "kb.intranet, testserver")
+    with TestClient(create_app(pipeline=FakePipeline())) as client:
+        assert client.get("/health", headers={"host": "kb.intranet"}).status_code == 200
+        assert client.get("/health", headers={"host": "localhost"}).status_code == 400
+
+
+def test_security_headers_and_page_csp(client: TestClient) -> None:
+    import base64
+    import hashlib
+
+    health = client.get("/health")
+    page = client.get("/")
+
+    for response in (health, page):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["referrer-policy"] == "no-referrer"
+    csp = page.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in csp and "default-src 'self'" in csp
+    # Разрешён ровно встроенный скрипт страницы — по хешу, а не 'unsafe-inline'.
+    script = re.search(r"<script>(.*?)</script>", page.text, re.DOTALL).group(1)
+    digest = base64.b64encode(hashlib.sha256(script.encode("utf-8")).digest()).decode("ascii")
+    assert f"'sha256-{digest}'" in csp and "unsafe-inline" not in csp.split("script-src")[1].split(";")[0]
+
+
+def test_service_logging_is_configured_when_uvicorn_left_it_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # uvicorn настраивает только свои логгеры: без этого INFO-строки kbrag («порог загружен»,
+    # «сервис готов») в Docker терялись.
+    kbrag_logger = logging.getLogger("kbrag")
+    monkeypatch.setattr(logging.root, "handlers", [])
+    monkeypatch.setattr(kbrag_logger, "level", kbrag_logger.level)
+    monkeypatch.delenv("KBRAG_LOG_LEVEL", raising=False)
+
+    _configure_service_logging()
+
+    assert logging.root.handlers
+    assert kbrag_logger.getEffectiveLevel() == logging.INFO
 
 
 # ---------------------------------------------------------------------------

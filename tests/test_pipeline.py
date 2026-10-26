@@ -545,7 +545,8 @@ def test_auto_threshold_none_without_file_or_with_bad_file(
     cfg = make_cfg(tmp_path, abstention={"threshold": "auto"})
     with caplog.at_level(logging.INFO, logger="kbrag.pipeline"):
         assert load_calibration(cfg) is None
-    assert any("не найден" in record.getMessage() for record in caplog.records)
+    # WARNING: сервис молча перестаёт отказываться по порогу — это должно быть видно в логах.
+    assert any("не найден" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
 
     path = Path(cfg.abstention.calibration_path)
     path.write_text("{не json", encoding="utf-8")

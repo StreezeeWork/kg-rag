@@ -360,7 +360,7 @@
     <section class="card intro" id="intro" aria-labelledby="intro-title">
       <h2 id="intro-title">Как получается ответ</h2>
       <ol class="steps">
-        <li><span class="step-num">1</span><span><b>Поиск.</b> Вопрос ищется по фрагментам документов сразу двумя способами — по словам (BM25) и по смыслу (эмбеддинги).</span></li>
+        <li><span class="step-num">1</span><span><b>Поиск.</b> <span id="search-step">Вопрос ищется по фрагментам документов базы знаний.</span></span></li>
         <li><span class="step-num">2</span><span><b>Проверка уверенности.</b> Если подходящих фрагментов нет, ассистент честно говорит «нет ответа», а не придумывает.</span></li>
         <li><span class="step-num">3</span><span><b>Ответ со ссылками.</b> Каждое утверждение помечено <span class="cite">[n]</span> — нажмите, чтобы увидеть фрагмент-источник.</span></li>
       </ol>
@@ -611,6 +611,28 @@
     }
   }
 
+  // Тексты о поиске зависят от конфига сервиса: берём их из /health, а не пишем «BM25 и эмбеддинги» наугад.
+  const SEARCH_MODES = {
+    bm25: "по словам (BM25)",
+    dense: "по смыслу (эмбеддинги)",
+    hybrid: "сразу двумя способами — по словам (BM25) и по смыслу (эмбеддинги)",
+  };
+  const SCORE_SOURCES = {
+    rerank: "score реранкера",
+    dense: "косинус плотного поиска",
+    bm25: "score BM25",
+  };
+  let scoreSourceLabel = "";
+
+  function describeSearch(health) {
+    const mode = SEARCH_MODES[health.retrieval_mode];
+    if (mode) {
+      $("search-step").textContent = `Вопрос ищется по фрагментам документов ${mode}.`
+        + (health.reranker ? " Затем реранкер перечитывает лучших кандидатов вместе с вопросом." : "");
+    }
+    scoreSourceLabel = SCORE_SOURCES[health.score_source] || "";
+  }
+
   async function checkHealth() {
     const healthEl = $("health");
     try {
@@ -628,6 +650,7 @@
       healthEl.textContent = text;
       // Подсказка в пустом поле «Фрагментов» — top_k из конфига сервиса (под него откалиброван порог).
       if (body && Number.isInteger(body.top_k)) topKEl.placeholder = String(body.top_k);
+      describeSearch(body || {});
     } catch {
       healthEl.dataset.state = "down";
       healthEl.textContent = "сервис недоступен";
@@ -691,7 +714,7 @@
     if (typeof confidence === "number" && Number.isFinite(confidence)) {
       badges.push(el("span", {
         className: "badge neutral",
-        title: "Насколько поиск уверен в лучшем фрагменте (score реранкера или плотного поиска). "
+        title: `Насколько поиск уверен в лучшем фрагменте${scoreSourceLabel ? ` (${scoreSourceLabel})` : ""}. `
           + "Ниже порога ассистент отказывается отвечать.",
       }, icon("gauge"), "Уверенность ", el("span", { className: "num", text: formatScore(confidence) })));
     }
@@ -722,15 +745,16 @@
   }
 
   // Превращает «… 28 дней [1]. … [2, 3]» в текст с кнопками-ссылками на фрагменты.
-  // Регулярка совпадает с форматами, которые понимает parse_citations на сервере: [1], [1, 2], [1][3].
-  const CITATION_RE = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
+  // Регулярка — копия CITATION_RE из kbrag/generation/citations.py (тест test_api сверяет их):
+  // [1], [1, 2], [1;2], [ 2 ], [1][3]. Номера внутри скобок разделены запятой или точкой с запятой.
+  const CITATION_RE = /\[\s*(\d+(?:\s*[,;]\s*\d+)*)\s*\]/g;
 
   function renderAnswer(text, contextsByCitation, abstained) {
     const parts = [];
     let cursor = 0;
     for (const match of text.matchAll(CITATION_RE)) {
       if (match.index > cursor) parts.push(document.createTextNode(text.slice(cursor, match.index)));
-      for (const raw of match[1].split(",")) {
+      for (const raw of match[1].split(/[,;]/)) {
         const index = Number.parseInt(raw.trim(), 10);
         const ctx = contextsByCitation.get(index);
         if (ctx) {
@@ -826,8 +850,13 @@
           ctx.section ? el("span", { className: "ctx-section", text: ctx.section }) : null),
         el("span", { className: "ctx-meta" },
           tags,
-          el("span", { className: "score", title: "Score релевантности на последнем этапе поиска" },
-            `score ${formatScore(ctx.score)}`),
+          // В гибриде ctx.score — ранговый RRF (≈0.016 у всех фрагментов): о релевантности он
+          // ничего не говорит. Показываем score того компонента, по которому считается уверенность.
+          typeof ctx.confidence_score === "number"
+            ? el("span", { className: "score", title: `${scoreSourceLabel || "Score"}: по нему считается уверенность` },
+              `score ${formatScore(ctx.confidence_score)}`)
+            : el("span", { className: "score", title: "Score на последнем этапе поиска" },
+              `score ${formatScore(ctx.score)}`),
           el("span", { className: "chevron" }, icon("chevron", 16))));
 
       const body = el("div", { className: "ctx-body" },

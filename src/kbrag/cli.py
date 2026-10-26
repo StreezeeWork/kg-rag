@@ -301,7 +301,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
     from kbrag.pipeline import RAGPipeline
 
     pipeline = RAGPipeline.from_config(cfg)
-    payload = build_ask_response(pipeline.answer(question, top_k=args.top_k)).model_dump(mode="json")
+    answer = pipeline.answer(question, top_k=args.top_k)
+    payload = build_ask_response(answer, pipeline.score_source).model_dump(mode="json")
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -325,7 +326,10 @@ def _print_answer(payload: dict[str, Any]) -> None:
     for ctx in payload["contexts"]:
         place = " > ".join(part for part in (ctx["title"], ctx["section"]) if part)
         mark = "  <- в ответе" if ctx["chunk_id"] in cited else ""
-        score = "—" if ctx["score"] is None else f"{ctx['score']:.3f}"
+        # В гибриде score — ранговый RRF (≈0.016 у всех), он ничего не говорит о релевантности;
+        # показываем score того компонента, по которому считается уверенность.
+        value = ctx["confidence_score"] if ctx.get("confidence_score") is not None else ctx["score"]
+        score = "—" if value is None else f"{value:.3f}"
         print(f"  [{ctx['index']}] {place} ({ctx['chunk_id']}, score {score}){mark}")
     if payload["flags"]:
         print(f"Флаги: {', '.join(payload['flags'])}")

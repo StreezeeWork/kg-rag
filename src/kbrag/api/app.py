@@ -10,6 +10,11 @@
     KBRAG_CONFIG=configs/offline.yaml uvicorn kbrag.api.app:app --port 8080
     kbrag serve --config configs/offline.yaml          # то же самое через CLI
 
+Переменные окружения: ``KBRAG_ALLOWED_HOSTS`` — допустимые Host через запятую (по умолчанию только
+локальные имена; при доступе по IP или имени в сети его нужно добавить), ``KBRAG_LOG_LEVEL`` —
+уровень логов kbrag (INFO). Swagger UI на ``/docs`` загружает скрипты с CDN, поэтому в закрытом
+контуре без интернета он не откроется; веб-страница на ``/`` внешних ресурсов не использует.
+
 Жизненный цикл: при импорте модуля создаётся только объект ``app`` — быстро и без индекса.
 Индекс строится в ``lifespan`` один раз при старте сервера, до первого запроса. Если сборка
 упала (нет корпуса, битый конфиг), сервер не стартует: лучше упасть сразу и громко,
@@ -18,9 +23,12 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import math
 import os
+import re
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -30,8 +38,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from kbrag import __version__
 from kbrag.config import AppConfig, load_config
@@ -53,6 +63,18 @@ INDEX_HTML = Path(__file__).resolve().parent / "static" / "index.html"
 
 MAX_QUESTION_CHARS = 1000
 MAX_TOP_K = 20
+# Тело POST /ask: вопрос до 1000 символов даже в \uXXXX-экранировании — около 6 КБ. 16 КиБ с запасом.
+MAX_BODY_BYTES = 16 * 1024
+_BODY_TOO_LARGE_DETAIL = (
+    f"Тело запроса больше {MAX_BODY_BYTES} байт: вопрос — не длиннее {MAX_QUESTION_CHARS} символов."
+)
+
+# Защита от DNS rebinding (см. allowed_hosts_from_env). "app" — имя сервиса в docker-compose,
+# "testserver" — хост, с которым ходит FastAPI TestClient в тестах.
+ALLOWED_HOSTS_ENV_VAR = "KBRAG_ALLOWED_HOSTS"
+DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "[::1]", "app", "testserver")
+LOG_LEVEL_ENV_VAR = "KBRAG_LOG_LEVEL"
+_INLINE_SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.DOTALL)
 
 # Флаги ответа, которые означают подозрение на prompt injection (см. kbrag.generation.guardrails).
 CONTEXT_INJECTION_PREFIX = "prompt_injection"
@@ -167,6 +189,11 @@ class CitationOut(BaseModel):
     """Ссылка ``[n]`` из текста ответа на фрагмент-источник."""
 
     index: int = Field(description="Номер n из ссылки [n] в тексте ответа")
+    # index — номер в списке, который видел генератор; после guardrails (drop_chunk) он может не
+    # совпасть с позицией в contexts. Чтобы клиенту не сверять самому по chunk_id, отдаём и её.
+    context_index: int | None = Field(
+        default=None, description="Позиция фрагмента-источника в contexts (ContextOut.index)"
+    )
     chunk_id: str
     doc_id: str
     title: str
@@ -180,7 +207,14 @@ class ContextOut(BaseModel):
     doc_id: str
     title: str
     section: str
-    score: float | None = Field(description="Score релевантности на последнем этапе поиска")
+    score: float | None = Field(
+        description="Score на последнем этапе поиска (в гибриде это ранговый RRF: годится для порядка, "
+        "а не для оценки релевантности)"
+    )
+    confidence_score: float | None = Field(
+        default=None,
+        description="Score того компонента поиска, по которому считается уверенность (score_source в /health)",
+    )
     text: str
 
 
@@ -206,10 +240,21 @@ def _finite_or_none(value: float | None) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def build_ask_response(answer: Answer) -> AskResponse:
-    """``Answer`` пайплайна → ответ API. Тот же формат печатает ``kbrag ask --json``."""
+def build_ask_response(answer: Answer, score_source: str | None = None) -> AskResponse:
+    """``Answer`` пайплайна → ответ API. Тот же формат печатает ``kbrag ask --json``.
+
+    ``score_source`` — компонент поиска, по которому считается уверенность (``RAGPipeline.score_source``):
+    его score у каждого фрагмента попадает в ``ContextOut.confidence_score``.
+    """
+    positions = {item.chunk.chunk_id: position for position, item in enumerate(answer.contexts, start=1)}
     citations = [
-        CitationOut(index=c.index, chunk_id=c.chunk_id, doc_id=c.doc_id, title=c.title)
+        CitationOut(
+            index=c.index,
+            context_index=positions.get(c.chunk_id),
+            chunk_id=c.chunk_id,
+            doc_id=c.doc_id,
+            title=c.title,
+        )
         for c in answer.citations
     ]
     contexts = [
@@ -220,6 +265,7 @@ def build_ask_response(answer: Answer) -> AskResponse:
             title=item.chunk.title,
             section=item.chunk.section,
             score=_finite_or_none(item.score),
+            confidence_score=_finite_or_none(item.details.get(score_source)) if score_source else None,
             text=item.chunk.text,
         )
         for position, item in enumerate(answer.contexts, start=1)
@@ -368,6 +414,7 @@ def create_app(cfg: AppConfig | None = None, pipeline: RAGPipeline | None = None
         # Код до yield выполняется один раз при старте сервера, до приёма запросов. Сборка индекса
         # блокирует поток, но здесь это нормально: пока lifespan не дошёл до yield, uvicorn всё
         # равно не принимает соединения. Исключение здесь останавливает запуск сервера.
+        _configure_service_logging()
         if state.pipeline is None:
             if state.cfg is None:
                 state.cfg = config_from_env()
@@ -384,9 +431,135 @@ def create_app(cfg: AppConfig | None = None, pipeline: RAGPipeline | None = None
     )
     # Доступ к состоянию из тестов и отладчика: app.state.kbrag.metrics, app.state.kbrag.pipeline.
     app.state.kbrag = state
+    # Порядок важен: каждый add_middleware оборачивает всё, что добавлено до него. Метрики —
+    # самый внешний слой, поэтому они считают и отказы нижних слоёв (400 за чужой Host, 413).
+    app.add_middleware(BodySizeLimitMiddleware, max_body_size=MAX_BODY_BYTES)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts_from_env())
+    _add_security_headers(app)
     _add_metrics_middleware(app, state.metrics)
+    _add_validation_error_handler(app)
     _add_routes(app, state)
     return app
+
+
+# ---------------------------------------------------------------------------
+# Защита сервиса: размер тела, Host, заголовки безопасности, ошибки валидации
+# ---------------------------------------------------------------------------
+
+
+class BodySizeLimitMiddleware:
+    """Отвечает 413, если тело запроса больше ``max_body_size`` байт.
+
+    Ни Starlette, ни uvicorn по умолчанию размер тела не ограничивают: запрос на 20 МБ
+    читался целиком, разбирался как JSON и только потом отклонялся проверкой длины вопроса —
+    несколько таких запросов параллельно легко съедают память. Здесь две проверки: по заголовку
+    ``Content-Length`` (сразу, тело даже не читаем) и по реально пришедшим байтам — для тел без
+    этого заголовка (chunked). Во втором случае бросаем ``HTTPException(413)``: FastAPI
+    пропускает её из чтения тела как есть, и клиент получает обычный ответ ``{"detail": …}``.
+    """
+
+    def __init__(self, app: Any, max_body_size: int) -> None:
+        self.app = app
+        self.max_body_size = max_body_size
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = dict(scope.get("headers") or []).get(b"content-length", b"")
+        if declared.isdigit() and int(declared) > self.max_body_size:
+            response = JSONResponse({"detail": _BODY_TOO_LARGE_DETAIL}, status_code=413)
+            await response(scope, receive, send)
+            return
+
+        received = 0
+
+        async def limited_receive() -> dict:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_body_size:
+                    raise HTTPException(status_code=413, detail=_BODY_TOO_LARGE_DETAIL)
+            return message
+
+        await self.app(scope, limited_receive, send)
+
+
+def allowed_hosts_from_env() -> list[str]:
+    """Допустимые значения заголовка Host: ``$KBRAG_ALLOWED_HOSTS`` (через запятую) или локальные имена.
+
+    Зачем: у сервиса нет аутентификации, и без проверки Host его можно прочитать со стороннего
+    сайта через DNS rebinding — браузер считает запрос «своим», а сервер принимает любой Host.
+    При доступе по IP или имени в сети добавьте его в переменную; ``*`` выключает проверку.
+    """
+    raw = os.environ.get(ALLOWED_HOSTS_ENV_VAR, "")
+    hosts = [host.strip() for host in raw.split(",") if host.strip()]
+    return hosts or list(DEFAULT_ALLOWED_HOSTS)
+
+
+def _index_csp() -> str:
+    """Content-Security-Policy для веб-страницы: только свои ресурсы и только наш встроенный скрипт.
+
+    Хеш скрипта считается из самого файла, поэтому правка index.html не ломает страницу.
+    Стили разрешены inline: страница задаёт ширину полос таймингов атрибутом style.
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    hashes = [
+        "'sha256-" + base64.b64encode(hashlib.sha256(script.encode("utf-8")).digest()).decode("ascii") + "'"
+        for script in _INLINE_SCRIPT_RE.findall(html)
+    ]
+    script_src = " ".join(hashes) or "'none'"
+    return (
+        f"default-src 'self'; script-src {script_src}; "
+        "style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; "
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    )
+
+
+def _add_security_headers(app: FastAPI) -> None:
+    """Защита в глубину для всех ответов: браузер не угадывает тип содержимого и не шлёт Referer."""
+
+    @app.middleware("http")
+    async def security_headers(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
+
+def _add_validation_error_handler(app: FastAPI) -> None:
+    """Ответ 422 без эха ввода.
+
+    Стандартный ответ FastAPI кладёт в ``detail[].input`` присланное значение целиком: вопрос
+    на мегабайт возвращался обратно, а в вопросе могут быть личные данные (в логи мы их
+    специально не пишем). Клиенту для исправления хватает места ошибки и её описания.
+    """
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        errors = [
+            {"loc": list(e.get("loc", ())), "msg": e.get("msg", ""), "type": e.get("type", "")}
+            for e in exc.errors()
+        ]
+        return JSONResponse({"detail": errors}, status_code=422)
+
+
+def _configure_service_logging() -> None:
+    """Включает логи kbrag, если сервис запущен напрямую через uvicorn (Docker, ``make serve``).
+
+    uvicorn настраивает только свои логгеры, и без этого строки kbrag уровня INFO («Порог отказа
+    загружен», «Сервис готов», «ask: …») терялись. Если логирование уже настроено (``kbrag serve``,
+    тесты), ничего не меняем. Уровень — ``$KBRAG_LOG_LEVEL`` (по умолчанию INFO).
+    """
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"
+    )
+    logging.getLogger("kbrag").setLevel(os.environ.get(LOG_LEVEL_ENV_VAR, "INFO").upper())
 
 
 def _add_metrics_middleware(app: FastAPI, metrics: ServiceMetrics) -> None:
@@ -415,6 +588,7 @@ def _add_routes(app: FastAPI, state: ServiceState) -> None:
     """Регистрирует эндпоинты. Обработчики — замыкания над ``state`` этого приложения."""
 
     def require_pipeline() -> RAGPipeline:
+        # Как и 503 в /health: под uvicorn недостижимо (см. комментарий там), это защита без lifespan.
         if state.pipeline is None:
             raise HTTPException(
                 status_code=503, detail="Сервис ещё загружает индекс. Повторите запрос позже."
@@ -451,13 +625,15 @@ def _add_routes(app: FastAPI, state: ServiceState) -> None:
             answer.abstained,
             answer.timings_ms.get("total_ms", 0.0),
         )
-        return build_ask_response(answer)
+        return build_ask_response(answer, getattr(pipeline, "score_source", None))
 
     @app.get("/health", summary="Готовность сервиса и параметры индекса")
     def health(response: Response) -> dict[str, Any]:
         pipeline = state.pipeline
         if pipeline is None:
-            # 503 — сигнал балансировщику и Docker HEALTHCHECK: трафик сюда пока не направлять.
+            # Под uvicorn сюда не попасть: соединения принимаются только после lifespan, а до тех
+            # пор клиент (и Docker HEALTHCHECK) получает «connection refused». 503 — защита на
+            # случай приложения без lifespan (тесты, ручной запуск create_app без сервера).
             response.status_code = 503
             return {"status": "starting", "version": __version__}
         stats = dict(getattr(pipeline, "index_stats", None) or {})
@@ -483,12 +659,16 @@ def _add_routes(app: FastAPI, state: ServiceState) -> None:
         return PlainTextResponse(state.metrics.render(), media_type=PROMETHEUS_CONTENT_TYPE)
 
     @app.get("/", include_in_schema=False)
-    def index_page() -> FileResponse:
+    def index_page() -> HTMLResponse:
         if not INDEX_HTML.is_file():
             raise HTTPException(
                 status_code=404, detail="Веб-страница не найдена: нет файла api/static/index.html"
             )
-        return FileResponse(INDEX_HTML, media_type="text/html; charset=utf-8")
+        # CSP — только для страницы: Swagger UI на /docs грузит скрипты с CDN и под ней бы не открылся.
+        return HTMLResponse(
+            INDEX_HTML.read_text(encoding="utf-8"),
+            headers={"Content-Security-Policy": _index_csp(), "X-Frame-Options": "DENY"},
+        )
 
 
 def _component_name(pipeline: object, attribute: str) -> str | None:
