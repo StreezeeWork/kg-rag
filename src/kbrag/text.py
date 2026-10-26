@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import unicodedata
 from functools import lru_cache
 
@@ -44,6 +45,11 @@ STOPWORDS: frozenset[str] = frozenset(
 
 _RU_STEMMER = snowballstemmer.stemmer("russian")
 _EN_STEMMER = snowballstemmer.stemmer("english")
+# Объект snowballstemmer хранит состояние разбора (current, cursor) в себе, а /ask в API
+# выполняется в пуле потоков: два одновременных вызова портят друг другу слово (чужой стем
+# или IndexError). lru_cache сам потокобезопасен, но тело функции не защищает. Блокировка
+# берётся только при промахе кэша, поэтому после прогрева почти ничего не стоит.
+_STEMMER_LOCK = threading.Lock()
 
 
 def normalize(text: str) -> str:
@@ -61,9 +67,11 @@ def tokenize(text: str) -> list[str]:
 def stem(token: str) -> str:
     """Стемминг: русские слова — русским стеммером, латиница — английским, числа как есть."""
     if _CYRILLIC_RE.search(token):
-        return _RU_STEMMER.stemWord(token)
+        with _STEMMER_LOCK:
+            return _RU_STEMMER.stemWord(token)
     if _LATIN_RE.search(token) and token.isalpha():
-        return _EN_STEMMER.stemWord(token)
+        with _STEMMER_LOCK:
+            return _EN_STEMMER.stemWord(token)
     return token
 
 

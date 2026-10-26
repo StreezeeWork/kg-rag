@@ -6,7 +6,11 @@
 
 from __future__ import annotations
 
+import sys
+import threading
+
 import pytest
+import snowballstemmer
 
 from kbrag.text import (
     STOPWORDS,
@@ -92,6 +96,48 @@ def test_stem_uses_english_stemmer_for_latin() -> None:
 def test_stem_keeps_numbers_and_codes(token: str) -> None:
     # Коды и числа стеммить нельзя: "vpn-01" и "vpn-02" должны остаться разными терминами.
     assert stem(token) == token
+
+
+def test_stem_is_thread_safe() -> None:
+    # Регрессия: /ask в API выполняется в пуле потоков, а объект snowballstemmer хранит
+    # состояние разбора (current, cursor) в себе. Без блокировки параллельные вызовы портили
+    # друг другу слово: возвращался стем чужого слова или падал IndexError.
+    roots = ["отпуск", "заявлен", "руководител", "подразделен", "сотрудник", "компенсац", "договор", "проект"]
+    prefixes = ["", "пере", "под", "вы", "при", "раз", "от", "за", "до", "на"]
+    endings = ["а", "ом", "ами", "ах", "ов", "ей", "ям", "ями", "ию", "ия", "ого", "ому", "ыми", "ую", "ешь"]
+    words = [p + r + e for p in prefixes for r in roots for e in endings]  # 1200 разных словоформ
+    reference_stemmer = snowballstemmer.stemmer("russian")  # отдельный объект, только в этом потоке
+    expected = {word: reference_stemmer.stemWord(word) for word in words}
+
+    n_threads = 8
+    barrier = threading.Barrier(n_threads)
+    errors: list[Exception] = []
+    wrong: list[tuple[str, str]] = []
+
+    def worker(part: list[str]) -> None:
+        barrier.wait()  # стартуем одновременно, чтобы вызовы действительно пересекались
+        try:
+            for word in part:
+                result = stem(word)
+                if result != expected[word]:
+                    wrong.append((word, result))
+        except Exception as exc:  # исключение в потоке иначе потерялось бы, а тест прошёл
+            errors.append(exc)
+
+    stem.cache_clear()  # иначе ответы придут из lru_cache и стеммер вообще не будет вызван
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # частое переключение потоков: гонка воспроизводится надёжно
+    try:
+        threads = [threading.Thread(target=worker, args=(words[i::n_threads],)) for i in range(n_threads)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(old_interval)
+
+    assert not errors, errors[:3]
+    assert not wrong, wrong[:5]
 
 
 # ---------------------------------------------------------------- analyze
