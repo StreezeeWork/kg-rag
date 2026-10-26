@@ -1,0 +1,8 @@
+{
+  "fingerprint": "165ae5eef307",
+  "score_source": "rerank",
+  "threshold": 2.797738552093506,
+  "corpus_sha256": "be5fe72bcb47f3a6",
+  "experiment": "neural",
+  "created_at": "2026-10-26T16:47:40+00:00"
+}
