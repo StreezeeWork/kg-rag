@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import runpy
 import sys
 from datetime import datetime
@@ -105,6 +107,47 @@ def test_python_dash_m_passes_exit_code(tmp_path: Path, monkeypatch: pytest.Monk
     with pytest.raises(SystemExit) as exc:
         runpy.run_module("kbrag", run_name="__main__")
     assert exc.value.code == EXIT_ERROR
+
+
+def test_output_is_utf8_even_when_stdout_is_a_cp1251_pipe(
+    tmp_path: Path, cli_config: Path, parts_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Так выглядит stdout на Windows, когда вывод идёт в pipe или файл (Git Bash, `> answer.json`):
+    # кодировка локали. Раньше «→» в сводке build-gold давал UnicodeEncodeError и код 1.
+    raw = io.BytesIO()
+    fake_stdout = io.TextIOWrapper(raw, encoding="cp1251")
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+
+    assert main(build_gold_args(cli_config, parts_dir, tmp_path / "gold.jsonl")) == EXIT_OK
+
+    fake_stdout.flush()
+    assert "→" in raw.getvalue().decode("utf-8")
+
+
+def test_quiet_mode_silences_huggingface_noise(cli_config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("HF_HUB_VERBOSITY", "TRANSFORMERS_VERBOSITY", "HF_HUB_DISABLE_PROGRESS_BARS"):
+        monkeypatch.delenv(name, raising=False)
+    assert main(["validate-data", "--config", str(cli_config)]) == EXIT_OK
+    assert os.environ["HF_HUB_VERBOSITY"] == "error"
+    assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+
+
+def test_neural_config_without_neural_extras_fails_fast_with_offline_hint(
+    tmp_path: Path, base_config: dict, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import kbrag.pipeline
+    import kbrag.retrieval
+
+    def must_not_build(*args: object, **kwargs: object) -> None:
+        raise AssertionError("индекс не должен строиться: ошибка должна быть сразу")
+
+    monkeypatch.setattr(kbrag.retrieval, "neural_available", lambda: False)
+    monkeypatch.setattr(kbrag.pipeline.RAGPipeline, "from_config", must_not_build)
+    neural = write_config(tmp_path / "neural.yaml", base_config, rerank={"enabled": True})
+
+    assert main(["ask", "--config", str(neural), VACATION_Q]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "install-neural" in err and "configs/offline.yaml" in err
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +407,77 @@ def test_eval_save_calibration_writes_file_the_service_can_read(
     assert load_calibration(cfg) == pytest.approx(data["threshold"])
 
 
+@pytest.mark.parametrize(
+    ("abstention", "message"),
+    [
+        ({"threshold": 0.4}, "задан в конфиге"),
+        ({"enabled": False}, "выключен"),
+        ({"calibration_path": None}, "calibration_path"),
+    ],
+)
+def test_eval_save_calibration_preconditions_are_checked_before_running(
+    tmp_path: Path, base_config: dict, capsys: pytest.CaptureFixture[str], abstention: dict, message: str
+) -> None:
+    config = write_config(tmp_path / "c.yaml", base_config, abstention=abstention)
+    out = tmp_path / "out"
+
+    assert main(["eval", "--config", str(config), "--out", str(out), "--save-calibration"]) == EXIT_ERROR
+
+    assert message in capsys.readouterr().err
+    assert not out.exists()  # оценка даже не запускалась
+
+
+def test_eval_save_calibration_is_skipped_when_quality_gate_fails(
+    tmp_path: Path, base_config: dict, mini_gold_records: list[dict], capsys: pytest.CaptureFixture[str]
+) -> None:
+    gold = write_jsonl(tmp_path / "gold_dev_unans.jsonl", [*mini_gold_records, EXTRA_DEV_UNANSWERABLE])
+    config = write_config(tmp_path / "calib.yaml", base_config, gold_path=str(gold))
+    args = ["eval", "--config", str(config), "--save-calibration", "--fail-under", "recall@5=1.01"]
+
+    assert main(args) == EXIT_QUALITY_GATE
+
+    # Порог из прогона, не прошедшего gate, не должен попасть в сервис.
+    assert not Path(load_config(config).abstention.calibration_path).exists()
+    assert "не сохранён" in capsys.readouterr().err
+
+
+def test_eval_does_not_overwrite_calibration_when_no_threshold_was_chosen(
+    tmp_path: Path, cli_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # В мини-эталоне на dev нет неотвечаемых вопросов: порог не подбирается. Раньше в файл
+    # писалось "threshold": null поверх прежней калибровки.
+    calibration = Path(load_config(cli_config).abstention.calibration_path)
+    calibration.write_text('{"threshold": 0.5}', encoding="utf-8")
+
+    assert main(["eval", "--config", str(cli_config), "--save-calibration"]) == EXIT_ERROR
+
+    assert calibration.read_text(encoding="utf-8") == '{"threshold": 0.5}'
+    assert "не подобран" in capsys.readouterr().err
+
+
+def test_eval_names_run_after_config_from_env(
+    tmp_path: Path, cli_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KBRAG_CONFIG", str(cli_config))
+    assert main(["eval"]) == EXIT_OK
+    assert (tmp_path / "reports" / "mini" / "leaderboard.md").is_file()  # не «default»
+
+
+def test_eval_bad_out_dir_fails_before_running(
+    tmp_path: Path, cli_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kbrag.eval.runner
+
+    def must_not_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("оценка не должна запускаться с негодным --out")
+
+    monkeypatch.setattr(kbrag.eval.runner, "run_experiment", must_not_run)
+    not_a_dir = tmp_path / "file.txt"
+    not_a_dir.write_text("x", encoding="utf-8")
+
+    assert main(["eval", "--config", str(cli_config), "--out", str(not_a_dir / "sub")]) == EXIT_ERROR
+
+
 def test_eval_fails_without_gold(
     tmp_path: Path, base_config: dict, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -445,6 +559,31 @@ def test_serve_starts_uvicorn_with_configured_app(
     state = calls["app"].state.kbrag
     assert state.pipeline is None  # индекс строится при старте uvicorn, а не в CLI
     assert state.cfg.corpus_dir == str(mini_corpus_dir)
+
+
+def test_serve_startup_failure_returns_documented_error_code(
+    cli_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import uvicorn
+
+    def failed_startup(app: object, host: str, port: int) -> None:
+        raise SystemExit(3)  # так uvicorn сообщает, что lifespan упал (нет корпуса, битый конфиг)
+
+    monkeypatch.setattr(uvicorn, "run", failed_startup)
+    assert main(["serve", "--config", str(cli_config)]) == EXIT_ERROR
+
+
+def test_serve_logs_info_without_verbose_flag(cli_config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import uvicorn
+
+    import kbrag.cli
+
+    levels: list[int] = []
+    monkeypatch.setattr(kbrag.cli, "_setup_logging", levels.append)
+    monkeypatch.setattr(uvicorn, "run", lambda app, host, port: None)
+
+    assert main(["serve", "--config", str(cli_config)]) == EXIT_OK
+    assert levels == [1]  # INFO: «порог отказа загружен», «сервис готов» — журнал сервиса
 
 
 def test_serve_rejects_invalid_port(cli_config: Path) -> None:

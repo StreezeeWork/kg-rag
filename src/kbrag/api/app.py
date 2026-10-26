@@ -75,33 +75,64 @@ LATENCY_ENDPOINT = "/ask"
 # ---------------------------------------------------------------------------
 
 
+def config_path_from_env() -> str | None:
+    """Какой файл конфига возьмёт сервис: ``$KBRAG_CONFIG``, иначе ``configs/default.yaml``, если он есть.
+
+    None — файла нет, будут значения по умолчанию. Это правило в проекте одно: им пользуются
+    и ``config_from_env``, и CLI (например, чтобы назвать прогон ``kbrag eval`` по имени файла).
+    """
+    explicit_path = os.environ.get(CONFIG_ENV_VAR)
+    if explicit_path:
+        return explicit_path
+    return DEFAULT_CONFIG_PATH if Path(DEFAULT_CONFIG_PATH).is_file() else None
+
+
 def config_from_env() -> AppConfig:
     """Конфиг из ``$KBRAG_CONFIG``, иначе ``configs/default.yaml``, иначе значения по умолчанию.
 
     Явно указанный в переменной файл обязан существовать (``FileNotFoundError``): опечатка
-    в пути не должна молча запускать сервис с другими настройками. А вот отсутствие файла
-    по умолчанию — нормальная ситуация (например, запуск не из корня проекта): тогда
-    берутся значения по умолчанию из ``AppConfig`` (офлайн-поиск, extractive-ответы).
+    в пути не должна молча запускать сервис с другими настройками. Если же нет и файла по
+    умолчанию (запуск не из корня проекта), берутся значения по умолчанию из ``AppConfig``.
+    Учтите: пути в них относительные (``data/corpus``), поэтому вне корня проекта сервис
+    стартует, только если задан ``$KBRAG_CORPUS_DIR`` (или ``$KBRAG_CONFIG`` с абсолютными путями).
     """
-    explicit_path = os.environ.get(CONFIG_ENV_VAR)
-    if explicit_path:
-        logger.info("Конфиг из %s=%s", CONFIG_ENV_VAR, explicit_path)
-        return load_config(explicit_path)
-    if Path(DEFAULT_CONFIG_PATH).is_file():
-        logger.info("Конфиг по умолчанию: %s", DEFAULT_CONFIG_PATH)
-        return load_config(DEFAULT_CONFIG_PATH)
+    path = config_path_from_env()
+    if path is not None:
+        logger.info("Конфиг: %s", path)
+        return load_config(path)
     logger.warning(
-        "Файл %s не найден, а %s не задана: используются значения по умолчанию",
+        "Файл %s не найден, а %s не задана: используются значения по умолчанию "
+        "(корпус — %s или $KBRAG_CORPUS_DIR)",
         DEFAULT_CONFIG_PATH,
         CONFIG_ENV_VAR,
+        AppConfig().corpus_dir,
     )
     return load_config(None)
 
 
+def require_installed_extras(cfg: AppConfig) -> None:
+    """Падает сразу и с подсказкой, если конфигу нужны нейросетевые пакеты, а их нет.
+
+    Базовая установка (``make install``, CI, Docker) — офлайн, а ``configs/default.yaml`` —
+    нейросетевой. Без этой проверки новичок узнавал бы об этом только после сборки индекса,
+    а подсказка не говорила бы, что есть офлайн-конфиг.
+    """
+    from kbrag.eval.runner import config_needs_neural
+    from kbrag.retrieval import neural_available
+
+    if config_needs_neural(cfg) and not neural_available():
+        raise ImportError(
+            "этому конфигу нужны нейросетевые модели (sentence-transformers), а они не установлены: "
+            "make install-neural (pip install -e .[neural]) — или запустите офлайн-вариант: "
+            "--config configs/offline.yaml (KBRAG_CONFIG=configs/offline.yaml)"
+        )
+
+
 def build_pipeline(cfg: AppConfig) -> RAGPipeline:
-    """Собирает пайплайн по конфигу: чтение корпуса, нарезка, индекс, модели."""
+    """Собирает пайплайн по конфигу: проверка зависимостей, чтение корпуса, нарезка, индекс, модели."""
     from kbrag.pipeline import RAGPipeline
 
+    require_installed_extras(cfg)
     return RAGPipeline.from_config(cfg)
 
 

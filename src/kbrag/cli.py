@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections import Counter
 from collections.abc import Sequence
@@ -92,16 +93,52 @@ def _print_error(message: str) -> None:
     print(f"Ошибка: {message}", file=sys.stderr)
 
 
-def _load_cfg(path: str | None) -> AppConfig:
-    """Явный ``--config`` обязан существовать; без него — как у сервиса (``$KBRAG_CONFIG`` или default.yaml)."""
+def _load_cfg(path: str | None, needs_index: bool = False) -> AppConfig:
+    """Явный ``--config`` обязан существовать; без него — как у сервиса (``$KBRAG_CONFIG`` или default.yaml).
+
+    ``needs_index=True`` (ask, eval, serve): сразу проверяем, что для конфига установлены
+    нейросетевые пакеты, — а не после минуты сборки индекса.
+    """
     if path:
         if not Path(path).is_file():
             raise FileNotFoundError(f"конфиг не найден: {path}")
-        return load_config(path)
-    # Правило выбора конфига по умолчанию живёт в одном месте — у сервиса.
-    from kbrag.api.app import config_from_env
+        cfg = load_config(path)
+    else:
+        # Правило выбора конфига по умолчанию живёт в одном месте — у сервиса.
+        from kbrag.api.app import config_from_env
 
-    return config_from_env()
+        cfg = config_from_env()
+    if needs_index:
+        from kbrag.api.app import require_installed_extras
+
+        require_installed_extras(cfg)
+    return cfg
+
+
+def _config_stem(path: str | None) -> str:
+    """Имя прогона по умолчанию — имя файла конфига, которым реально воспользовались.
+
+    Без ``--config`` это ``$KBRAG_CONFIG`` или configs/default.yaml — как у сервиса.
+    """
+    if path is None:
+        from kbrag.api.app import config_path_from_env
+
+        path = config_path_from_env()
+    return Path(path).stem if path else "default"
+
+
+def _use_utf8_output() -> None:
+    """Переключает stdout/stderr на UTF-8, если они в другой кодировке.
+
+    На Windows, когда вывод идёт не в консоль (pipe в Git Bash, ``> answer.json``, IDE, CI),
+    Python пишет в кодировке локали — cp1251 или cp1252. В них нет «→», «≥», а в cp1252 и всей
+    кириллицы, и ``kbrag ask --json > answer.json`` падал с UnicodeEncodeError, оставляя пустой файл.
+    В настоящей консоли кодировка уже UTF-8, и тогда ничего не меняем.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        if hasattr(stream, "reconfigure") and encoding != "utf8":
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -258,7 +295,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     if not question:
         _print_error("пустой вопрос")
         return EXIT_ERROR
-    cfg = _load_cfg(args.config)
+    cfg = _load_cfg(args.config, needs_index=True)
 
     from kbrag.api.app import build_ask_response
     from kbrag.pipeline import RAGPipeline
@@ -303,9 +340,13 @@ def cmd_eval(args: argparse.Namespace) -> int:
     """Оценка одного конфига: отчёт в reports/<name>/, опционально порог и quality gate."""
     from kbrag.eval.runner import run_experiment
 
-    cfg = _load_cfg(args.config)
+    cfg = _load_cfg(args.config, needs_index=True)
     gates: list[tuple[str, float]] = args.fail_under or []
-    # Метрики проверяем ДО прогона: узнать об опечатке через 10 минут оценки обидно.
+    # Всё, что можно проверить ДО прогона, проверяем до него: узнать об опечатке в метрике,
+    # о невозможности сохранить порог или о неверном --out через 10 минут оценки обидно.
+    if args.save_calibration and (reason := _calibration_not_saveable(cfg)):
+        _print_error(f"--save-calibration: {reason}")
+        return EXIT_ERROR
     known = metric_names(cfg.eval.k_values)
     unknown = [name for name, _ in gates if name not in known]
     if unknown:
@@ -323,17 +364,30 @@ def cmd_eval(args: argparse.Namespace) -> int:
         _print_error(f"эталонный набор {cfg.gold_path} не найден — соберите его командой `kbrag build-gold`")
         return EXIT_ERROR
 
-    name = args.name or (Path(args.config).stem if args.config else "default")
-    result = run_experiment(cfg, name=name)
+    name = args.name or _config_stem(args.config)
     out_dir = Path(args.out or cfg.reports_dir) / safe_file_name(name)
+    out_dir.mkdir(parents=True, exist_ok=True)  # неверный путь — ошибка сразу, а не после прогона
+
+    result = run_experiment(cfg, name=name)
     leaderboard = write_report([result], out_dir, split=cfg.eval.report_split)
     _print_eval_summary(result)
     print(f"Отчёт: {leaderboard}")
 
+    code = _check_quality_gates(result, gates)
     if args.save_calibration:
+        # Порог из прогона, не прошедшего quality gate, в сервис не отдаём.
+        if code != EXIT_OK:
+            print("Порог отказа не сохранён: quality gate не пройден.", file=sys.stderr)
+            return code
+        if result.threshold is None:
+            _print_error(
+                "порог отказа не подобран на dev (нет неотвечаемых dev-вопросов или ни один порог "
+                "не лучше случайного) — файл калибровки не изменён"
+            )
+            return EXIT_ERROR
         path = _save_calibration(cfg, result.name, result.threshold)
         print(f"Порог отказа сохранён: {path}")
-    return _check_quality_gates(result, gates)
+    return code
 
 
 def _print_eval_summary(result: ExperimentResult) -> None:
@@ -346,7 +400,22 @@ def _print_eval_summary(result: ExperimentResult) -> None:
         print(f"  {metric:<20}{format_number(result.metric(metric, GATE_SPLIT)):>10}")
 
 
-def _save_calibration(cfg: AppConfig, experiment: str, threshold: float | None) -> Path:
+def _calibration_not_saveable(cfg: AppConfig) -> str | None:
+    """Почему порог этого конфига нельзя сохранить для сервиса (None — можно)."""
+    abstention = cfg.abstention
+    if not abstention.enabled:
+        return "отказ по порогу выключен (abstention.enabled: false) — сохранять нечего"
+    if abstention.threshold != "auto":
+        return (
+            f"порог не подбирается: abstention.threshold={abstention.threshold!r} задан в конфиге, "
+            "сервис возьмёт его оттуда (подбор на dev — только при threshold: auto)"
+        )
+    if not abstention.calibration_path:
+        return "в конфиге не задан abstention.calibration_path — некуда сохранить порог"
+    return None
+
+
+def _save_calibration(cfg: AppConfig, experiment: str, threshold: float) -> Path:
     """Пишет порог для сервиса в ``abstention.calibration_path``.
 
     Формат файла задаёт ``pipeline.save_calibration`` — тот же модуль, что его читает
@@ -355,12 +424,6 @@ def _save_calibration(cfg: AppConfig, experiment: str, threshold: float | None) 
     """
     from kbrag.pipeline import save_calibration
 
-    if not cfg.abstention.calibration_path:
-        raise ValueError("в конфиге не задан abstention.calibration_path — некуда сохранить порог")
-    if threshold is None:
-        logger.warning(
-            "Порог не подобран (на dev нет неотвечаемых вопросов?): сервис не будет отказываться по порогу"
-        )
     return save_calibration(cfg, threshold, experiment=experiment)
 
 
@@ -423,12 +486,17 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     from kbrag.api.app import create_app
 
-    cfg = _load_cfg(args.config)
+    cfg = _load_cfg(args.config, needs_index=True)
     app = create_app(cfg=cfg)
     print(
         f"kb-rag: индекс строится при старте, затем сервис будет доступен на http://{args.host}:{args.port}"
     )
-    uvicorn.run(app, host=args.host, port=args.port)
+    try:
+        uvicorn.run(app, host=args.host, port=args.port)
+    except SystemExit as exc:
+        # Если старт упал (нет корпуса, битый конфиг), uvicorn сам вызывает sys.exit(3). Переводим
+        # это в наш документированный код 1, чтобы скрипты и CI видели обычную «ошибку данных/конфига».
+        return EXIT_ERROR if exc.code else EXIT_OK
     return EXIT_OK
 
 
@@ -574,12 +642,24 @@ def _setup_logging(verbosity: int) -> None:
     logging.basicConfig(
         level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"
     )
+    if verbosity <= 0:
+        # Без -v прячем шум библиотек HuggingFace: «Could not reach the Hub» при офлайн-режиме
+        # (дважды на каждую модель) и полосы прогресса «Loading weights». Именно переменные
+        # окружения, а не logging.getLogger(...).setLevel: huggingface_hub при импорте сам
+        # выставляет уровень своему логгеру и перетёр бы наш. Импорт моделей ленивый, поэтому
+        # сюда мы успеваем раньше. setdefault: явно заданное пользователем значение важнее.
+        os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Точка входа: ``kbrag ...`` (pyproject.toml) и ``python -m kbrag ...``. Возвращает код выхода."""
+    _use_utf8_output()
     args = build_parser().parse_args(argv)
-    _setup_logging(args.verbose)
+    # У сервиса строки INFO («порог отказа загружен», «сервис готов») — его основной журнал,
+    # поэтому для serve уровень INFO и без -v.
+    _setup_logging(max(args.verbose, 1) if args.command == "serve" else args.verbose)
     try:
         return args.handler(args)
     except KeyboardInterrupt:
