@@ -41,8 +41,8 @@ class DenseRetriever(Retriever):
             self.matrix = np.zeros((0, 0), dtype=np.float32)
             return
         texts = [chunk.index_text(self.with_header) for chunk in chunks]
-        self.embedder.fit(texts)
-        matrix = np.asarray(self.embedder.encode_passages(texts), dtype=np.float32)
+        # Обучение и кодирование корпуса одним вызовом: LSA не считает TF-IDF фрагментов дважды.
+        matrix = np.asarray(self.embedder.fit_encode_passages(texts), dtype=np.float32)
         if matrix.ndim != 2 or matrix.shape[0] != len(chunks):
             raise ValueError(f"Эмбеддер вернул матрицу формы {matrix.shape}, ожидалось ({len(chunks)}, dim)")
         self.matrix = matrix

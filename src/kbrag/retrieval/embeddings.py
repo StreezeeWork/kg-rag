@@ -5,6 +5,8 @@
 - ``LSAEmbedder`` — классический латентно-семантический анализ (TF-IDF по символьным
   n-граммам + SVD). Работает офлайн, без скачивания моделей, за секунды; символьные
   n-граммы сглаживают словоформы и опечатки. Это «плотный» baseline для CI и ноутбука.
+  Важная оговорка: если размерность SVD почти равна числу фрагментов, никакого сжатия нет
+  и это просто TF-IDF по n-граммам (подробности — в докстринге класса).
 - ``SentenceTransformerEmbedder`` — нейросетевая модель (например, multilingual-e5).
   Качественнее, но требует ``pip install -e .[neural]`` и скачивания весов.
 
@@ -20,6 +22,7 @@ import os
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
@@ -27,6 +30,9 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 from kbrag.config import DenseConfig
 from kbrag.text import normalize
+
+if TYPE_CHECKING:
+    from scipy.sparse import spmatrix  # разреженная матрица TF-IDF (нужна только для аннотаций)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +79,15 @@ class Embedder(ABC):
     def fit(self, passages: list[str]) -> None:  # noqa: B027 — пустая реализация по умолчанию намеренна
         """Обучение на корпусе. Нейросетевым моделям не нужно, LSA — обязательно."""
 
+    def fit_encode_passages(self, passages: list[str]) -> np.ndarray:
+        """Обучение на корпусе и сразу векторы тех же пассажей (так индексирует ``DenseRetriever``).
+
+        По умолчанию это просто ``fit`` + ``encode_passages``. Отдельный метод нужен LSA:
+        при обучении матрица TF-IDF пассажей уже посчитана, и строить её второй раз незачем.
+        """
+        self.fit(passages)
+        return self.encode_passages(passages)
+
     @abstractmethod
     def encode_queries(self, texts: list[str]) -> np.ndarray:
         """Матрица (len(texts), dim), float32, строки L2-нормированы."""
@@ -83,14 +98,25 @@ class Embedder(ABC):
 
 
 class LSAEmbedder(Embedder):
-    """TF-IDF по символьным n-граммам (3–5) + TruncatedSVD.
+    """TF-IDF по символьным n-граммам (3–5) + TruncatedSVD до ``dim`` компонент.
 
-    SVD сжимает десятки тысяч n-грамм в ``dim`` «тем», и тексты с похожими n-граммами
-    оказываются рядом, даже если общих слов целиком у них нет. ``seed`` фиксирует
-    рандомизированный SVD: одинаковый корпус → одинаковые векторы при каждом запуске.
+    Что здесь на самом деле работает:
+
+    * устойчивость к словоформам и опечаткам даёт сам символьный TF-IDF: у «отпуска»
+      и «отпуском» общие n-граммы «отп», «пус», «уск»…, даже без всякого SVD;
+    * SVD сжимает десятки тысяч n-грамм в ``dim`` «тем» и сближает тексты с похожими
+      n-граммами — но только если ``dim`` **заметно меньше** числа фрагментов. Ранг матрицы
+      TF-IDF не больше числа фрагментов; если ``dim`` его достигает, проекция сохраняет
+      скалярные произведения запроса с фрагментами, и ранжирование совпадает с обычным
+      TF-IDF — SVD лишь тратит время. Поэтому ``fit`` предупреждает о почти полном ранге,
+      а ``retrieval.dense.lsa_dim`` подбирается на dev, а не «чем больше, тем точнее».
+
+    ``seed`` фиксирует рандомизированный SVD: одинаковый корпус → одинаковые векторы при каждом запуске.
     """
 
     name = "lsa"
+    # Если компонент не меньше этой доли от максимально возможного числа, SVD почти ничего не сжимает.
+    NEAR_FULL_RANK = 0.9
 
     def __init__(self, dim: int = 256, seed: int = 0) -> None:
         if dim < 1:
@@ -98,10 +124,21 @@ class LSAEmbedder(Embedder):
         self.dim = dim
         self.seed = seed
         self.n_components: int | None = None  # фактическая размерность после fit
+        self.explained_variance: float | None = None  # доля дисперсии TF-IDF, сохранённая SVD
         self._vectorizer: TfidfVectorizer | None = None
         self._svd: TruncatedSVD | None = None
 
     def fit(self, passages: list[str]) -> None:
+        self._fit(passages)
+
+    def fit_encode_passages(self, passages: list[str]) -> np.ndarray:
+        # Проецируем через svd.transform, как и запросы (а не берём U·Σ из fit_transform):
+        # у рандомизированного SVD они могут чуть различаться, а запрос и фрагменты должны
+        # попадать в одно пространство одним и тем же путём.
+        return self._project(self._fit(passages))
+
+    def _fit(self, passages: list[str]) -> spmatrix:
+        """Обучает TF-IDF и SVD; возвращает матрицу TF-IDF пассажей, чтобы её не считать повторно."""
         if not passages:
             raise ValueError("LSAEmbedder.fit: нужен хотя бы один текст")
         vectorizer = TfidfVectorizer(
@@ -115,17 +152,30 @@ class LSAEmbedder(Embedder):
         n_docs, n_features = tfidf.shape
         # SVD не может дать компонент больше, чем (число документов − 1) и (число признаков − 1):
         # на крошечном корпусе честно уменьшаем размерность вместо падения.
-        n_components = min(self.dim, n_features - 1, n_docs - 1)
+        max_components = min(n_features, n_docs) - 1
+        n_components = min(self.dim, max_components)
         if n_components >= 1:
             self._svd = TruncatedSVD(n_components=n_components, random_state=self.seed)
             self._svd.fit(tfidf)
             self.n_components = n_components
+            self.explained_variance = float(self._svd.explained_variance_ratio_.sum())
+            if n_components >= self.NEAR_FULL_RANK * max_components:
+                logger.warning(
+                    "LSAEmbedder: SVD почти полного ранга (%d компонент при %d фрагментах, сохранено %.1f%% "
+                    "дисперсии) — эмбеддинги практически эквивалентны TF-IDF по n-граммам без сжатия. "
+                    "Чтобы SVD что-то сглаживал, уменьшите retrieval.dense.lsa_dim (подбирайте на dev).",
+                    n_components,
+                    n_docs,
+                    100 * self.explained_variance,
+                )
         else:
             # Один документ: сжимать нечего — используем сам TF-IDF-вектор (это тоже валидный эмбеддинг).
             logger.warning("LSAEmbedder: корпус слишком мал для SVD (%d док.), используется TF-IDF", n_docs)
             self._svd = None
             self.n_components = n_features
+            self.explained_variance = None
         self._vectorizer = vectorizer
+        return tfidf
 
     def encode_queries(self, texts: list[str]) -> np.ndarray:
         return self._encode(texts)
@@ -138,7 +188,10 @@ class LSAEmbedder(Embedder):
             raise RuntimeError("LSAEmbedder не обучен: сначала вызовите fit(passages)")
         if not texts:
             return np.zeros((0, self.n_components or 0), dtype=np.float32)
-        tfidf = self._vectorizer.transform(texts)
+        return self._project(self._vectorizer.transform(texts))
+
+    def _project(self, tfidf: spmatrix) -> np.ndarray:
+        """TF-IDF → SVD (если он есть) → L2-нормировка. Запросы и пассажи идут одним путём."""
         vectors = self._svd.transform(tfidf) if self._svd is not None else tfidf.toarray()
         return l2_normalize(vectors)
 

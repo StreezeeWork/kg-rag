@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sys
 import types
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 from kbrag.config import DenseConfig
 from kbrag.retrieval import (
@@ -231,6 +233,79 @@ def test_lsa_uses_project_normalization(mini_chunks: list[Chunk]) -> None:
     embedder = LSAEmbedder()
     embedder.fit([c.text for c in mini_chunks])
     np.testing.assert_allclose(embedder.encode_queries(["ПОДАЁТСЯ"]), embedder.encode_queries(["подается"]))
+
+
+def test_lsa_warns_when_svd_is_near_full_rank(
+    mini_chunks: list[Chunk], caplog: pytest.LogCaptureFixture
+) -> None:
+    texts = [c.index_text() for c in mini_chunks]
+    with caplog.at_level(logging.WARNING, logger="kbrag.retrieval.embeddings"):
+        LSAEmbedder(dim=256).fit(texts)  # 8 фрагментов → 7 компонент из 7 возможных
+    assert "почти полного ранга" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="kbrag.retrieval.embeddings"):
+        embedder = LSAEmbedder(dim=3)
+        embedder.fit(texts)  # 3 из 7: SVD действительно сжимает
+    assert "почти полного ранга" not in caplog.text
+    assert embedder.explained_variance is not None and 0.0 < embedder.explained_variance < 1.0
+
+
+def test_lsa_with_full_rank_ranks_exactly_like_plain_tfidf() -> None:
+    # Фиксируем вырождение, о котором предупреждает fit: если компонент не меньше ранга
+    # матрицы TF-IDF, SVD сохраняет скалярные произведения запроса с фрагментами,
+    # и LSA ранжирует ровно как TF-IDF без сжатия. Повторы текстов делают ранг (6) меньше
+    # числа компонент (8 из 9 фрагментов), поэтому равенство здесь точное.
+    unique = [
+        "отпуск составляет 28 календарных дней",
+        "заявление на отпуск подаётся за 14 дней",
+        "клиент VPN устанавливают через сервис-деск",
+        "пароль меняется каждые 90 дней",
+        "компенсация интернета 1500 рублей в месяц",
+        "удалённая работа до 3 дней в неделю",
+    ]
+    texts = unique + unique[:3]
+    queries = ["сколько дней отпуска", "как поменять пароль", "VPN клиент", "работа из дома"]
+
+    lsa = LSAEmbedder(dim=256)
+    lsa_passages = lsa.fit_encode_passages(texts)
+    lsa_scores = lsa.encode_queries(queries) @ lsa_passages.T
+
+    tfidf = lsa._vectorizer  # тот же векторизатор, но без SVD
+    tfidf_passages = l2_normalize(tfidf.transform(texts).toarray())
+    tfidf_scores = l2_normalize(tfidf.transform(queries).toarray()) @ tfidf_passages.T
+
+    for lsa_row, tfidf_row in zip(lsa_scores, tfidf_scores, strict=True):
+        # У LSA другая норма запроса (часть его n-грамм вне пространства корпуса), поэтому
+        # сравниваем с точностью до множителя: порядок фрагментов обязан совпасть.
+        np.testing.assert_allclose(lsa_row / lsa_row.max(), tfidf_row / tfidf_row.max(), atol=1e-4)
+
+
+def test_lsa_fit_encode_passages_equals_fit_then_encode(mini_chunks: list[Chunk]) -> None:
+    texts = [c.index_text() for c in mini_chunks]
+    separate = LSAEmbedder(dim=5)
+    separate.fit(texts)
+    np.testing.assert_allclose(
+        LSAEmbedder(dim=5).fit_encode_passages(texts), separate.encode_passages(texts), atol=1e-5
+    )  # допуск — на округление float32
+
+
+def test_dense_index_builds_lsa_tfidf_once(mini_chunks: list[Chunk], monkeypatch: pytest.MonkeyPatch) -> None:
+    # Регрессия: раньше index вызывал fit (fit_transform TF-IDF), а затем encode_passages
+    # заново прогонял те же тексты через transform — двойная работа на каждом построении индекса.
+    calls: list[int] = []
+    original = TfidfVectorizer.transform
+
+    def counting_transform(self, raw_documents):
+        calls.append(len(raw_documents))
+        return original(self, raw_documents)
+
+    monkeypatch.setattr(TfidfVectorizer, "transform", counting_transform)
+    retriever = DenseRetriever(LSAEmbedder(dim=5))
+    retriever.index(mini_chunks)
+    assert calls == []  # при индексации — только fit_transform
+    retriever.search("отпуск", k=1)
+    assert calls == [1]  # запрос кодируется через transform, как и положено
 
 
 def test_dense_lsa_on_mini_corpus(mini_chunks: list[Chunk], mini_gold_records: list[dict]) -> None:
