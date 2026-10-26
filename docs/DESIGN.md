@@ -182,14 +182,34 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   `1. Продолжительность`, а не `Ежегодный оплачиваемый отпуск > 1. Продолжительность` — название и так
   есть в `Chunk.title` и в шапке `index_text`. Заголовки внутри блоков кода (```` ``` ````, `~~~`) секций не создают.
 - `parse_front_matter`: незакрытый `---`, невалидный YAML или YAML не-словарь → `ValueError`.
-- `text.split_sentences` не режет после сокращений `ул.`, `д.`, `г.`, `см.`, `т.`, `стр.` («ул. Облачная, д. 7»).
+- `text.split_sentences` не режет после сокращений `ул.`, `д.`, `г.`, `см.`, `т.`, `стр.`, `п.`, `пп.`, `ст.`,
+  `рис.`, `табл.` («ул. Облачная, д. 7», «п. 3»); цена — нет границы и после «т. д.» / «г.» в конце предложения.
+- `text.STOPWORDS` — только служебные слова: числительные, «раз», «нет», «можно/нельзя/надо/может»,
+  «более/больше/лучше» стоп-словами **не** являются (это факты); «из-за», «из-под» — являются.
+  `normalize` убирает «№» (NFKC превращал его в «no»). `text.stem` защищён блокировкой: snowballstemmer
+  не потокобезопасен, а `/ask` выполняется в пуле потоков.
+- `text.analyze(text, remove_stopwords=True, split_compounds="none")`: `"mixed"`/`"all"` добавляют части
+  составных токенов («vpn-шлюз» → + «vpn», «шлюз»); нужно только BM25 (`BM25Retriever(split_compounds=…)`),
+  метрики и генератор работают с целыми токенами. В конфиг (`retrieval.bm25`) режим пока не выведен.
 
 **retrieval**
 - `LSAEmbedder`: если `min(dim, n_features - 1, n_docs - 1) < 1` (один документ), SVD не делается —
-  используется нормированный TF-IDF; фактический размер — атрибут `n_components`.
+  используется нормированный TF-IDF; фактический размер — атрибут `n_components`. Если компонент
+  ≥ 0.9 от максимума, `fit` пишет предупреждение: SVD почти полного ранга ранжирует как TF-IDF без сжатия
+  (на 258 фрагментах `lsa_dim: 256` — именно так); доля сохранённой дисперсии — `explained_variance`.
+- `Embedder.fit_encode_passages(texts)` (по умолчанию `fit` + `encode_passages`) — им индексирует
+  `DenseRetriever`; LSA переиспользует матрицу TF-IDF из обучения вместо повторного `transform`.
+- Ключ кэша эмбеддингов: `sha1(EMBEDDING_CACHE_VERSION, model, ревизия снапшота HF, версия
+  sentence-transformers, prefix, тексты)`; временный файл уникален, ошибка записи кэша — только warning.
+- `make_reranker(cfg, *, with_header=True)`: `with_header` должен приходить из `cfg.chunking.with_header`,
+  чтобы реранкер видел тот же текст фрагмента, что и индекс.
+- `search_batch` — API для пакетных запросов (тесты сверяют его с `search`); оценка ищет по одному
+  вопросу, чтобы мерить задержку p50/p95.
 - `BM25Retriever` (нет известных термов) и `DenseRetriever` (нулевой вектор запроса) возвращают `[]`;
   тогда `RAGPipeline.confidence` = None и при заданном пороге вопрос получает отказ.
 - В гибриде у фрагмента, которого не нашёл один из компонентов, нет его ключа в `details`.
+- Тесты: общие помощники поиска и нарезки — `tests/chunk_helpers.py`; `tests/test_real_corpus.py`
+  проверяет инварианты нарезки и покрытие цитат эталона на `data/` для каждой нарезки из `configs/`.
 
 **generation / pipeline / api**
 - `Citation.index` — номер `[n]` в списке, который видел генератор (после `sanitize_contexts`).
@@ -200,13 +220,47 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   `experiment`, ещё `"experiment"`, `"created_at"`. `load_calibration` отвергает файл с другим
   `fingerprint` **или** другим `score_source`. Пишет файл только `kbrag eval --save-calibration`;
   `kbrag grid` калибровку не сохраняет (иначе последний эксперимент затёр бы порог сервиса).
+- `ExtractiveGenerator`: пункт списка выводится и оценивается вместе с контекстом — вводной фразой на «:»
+  перед списком или заголовком раздела (последняя строка `#` во фрагменте, иначе `Chunk.section`, без
+  номера): «Что запрещено: хранить секреты…». Предложение на «:» само кандидатом не бывает. В ответ идут
+  предложения со score ≥ 0.5 × лучшего (`_RELATIVE_CUTOFF`), не больше `max_sentences`.
+- `is_abstention` — True, только если в ответе есть фраза отказа, а вокруг неё лишь вежливые слова
+  («К сожалению,») и ссылки `[n]`; частичный ответ с этой фразой — не отказ. При отказе генератора пайплайн
+  возвращает ровно `ABSTAIN_TEXT` без ссылок (как оценка и отказ по порогу).
+- `OpenAICompatibleClient`: `timeout_s` — общий лимит на `chat()` вместе с повторами и паузами; повтор только
+  на 429/5xx и временные сетевые сбои (таймаут, `NetworkError`, `RemoteProtocolError`), при 429/503 пауза
+  не меньше `Retry-After`; `base_url` без `http(s)://` → `ValueError` в конструкторе; пустой `content` →
+  `LLMError`. `LLMResponse.finish_reason: str | None = None`; `GenerationResult.flags: list[str] = []`
+  добавляются к `Answer.flags` (`answer_truncated`, если модель упёрлась в `max_tokens`).
+- Порядок в `answer_with_contexts`: guardrails (флаги `prompt_injection:*` ставятся и при отказе по порогу) →
+  решение об отказе → `select_within_budget(prompt_contexts, generation.max_context_chars)` (в `prompts.py`;
+  то же правило, что у `format_context`) → генератор → `parse_citations` по тем же отобранным фрагментам.
+  Лимит действует на оба генератора; если отброшен хоть один фрагмент или обрезан первый — флаг `context_truncated`.
+- `RAGPipeline.answer(question, top_k)` ищет `max(top_k, cfg.retrieval.top_k)` фрагментов один раз: генератору —
+  первые `top_k`, а `confidence` — всегда по первым `cfg.retrieval.top_k` (на них калибруется порог), для этого
+  у `answer_with_contexts` есть необязательный `confidence_contexts`. `/health` отдаёт `top_k` и `score_source`.
+- guardrails: нормализация убирает все символы Unicode Cf и селекторы вариантов и заменяет латинские буквы-двойники
+  в словах со смешанными алфавитами; «ты теперь» требует роль или тире, «примечание для …» — маркер ИИ/бота
+  (голое «ассистент» — только с двоеточием). `sanitize_contexts` проверяет и `title`/`section` (флаг фрагменту;
+  `drop_line` заменяет поле на «—»). `format_context` убирает переводы строк и экранирует `<context>` в полях
+  шапки. Пределы фильтра (перефразы, разметка внутри фразы, смесь языков, поддельные метаданные) описаны
+  в модуле и закреплены тестом.
+- API: `CitationOut.context_index` (позиция источника в `contexts` или null), `ContextOut.confidence_score`
+  (score компонента `score_source`; `build_ask_response(answer, score_source=None)`). Тело запроса больше
+  16 КиБ → 413; Host не из `$KBRAG_ALLOWED_HOSTS` (по умолчанию localhost, 127.0.0.1, [::1], app, testserver)
+  → 400; 422 возвращает только `loc`/`msg`/`type` без эха ввода; `GET /` отдаётся с CSP по хешу встроенного
+  скрипта. Под голым uvicorn lifespan включает логи `kbrag` (уровень `$KBRAG_LOG_LEVEL`, по умолчанию INFO);
+  отсутствие файла калибровки при `threshold: auto` — WARNING.
 
 **eval**
 - Метрики поиска считаются по матрице покрытия: `coverage_matrix(chunks, spans, min_coverage=0.5)`
   (строки — ранги, столбцы — evidence), `hit_at_k / recall_at_k / precision_at_k / ndcg_at_k(coverage, k)`,
   `mrr(coverage)`; сводно — `retrieval_metrics(chunks, spans, k_values) -> dict` с именами `hit@k`, …, `mrr`.
-- `fact_recall` и `token_f1` сравнивают стемы `text.analyze` после `metrics.soft_stem` (снимает хвостовые
-  гласные у кириллицы, чтобы «дней» и «днях» совпали; цифры и латиница не меняются: 28 ≠ 280).
+- `fact_recall` и `token_f1` сравнивают термы `metrics.match_terms` (своя обвязка над `text.tokenize`/`stem`;
+  `text.analyze` общий с BM25 и не меняется): «не/ни/без» склеиваются со стемом следующего слова (`не_бол`),
+  «1 500» = «1500», время HH:MM — один терм (`09h00`), «10%» и «10 процентов» → `10pct`; `soft_stem` срезает
+  хвостовые гласные только у коротких корней из `_SHORT_ROOTS` (`дн`: «дней» = «днях»), а не у любой основы
+  (иначе «приём» = «премии»). Ограничение лексическое: синонимы и переставленный диапазон не видны.
 - `fact_recall`, `citation_precision`, `citation_recall` возвращают `float | None` (None — неприменимо).
 - `choose_threshold`: отвечаем при `confidence >= threshold`; None/NaN = −∞; ничья → меньший порог;
   None, если нет одного из классов или ни один порог не лучше balanced accuracy 0.5.
@@ -215,8 +269,47 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
 - `experiments.yaml`: ключи верхнего уровня `base`, `experiments`, `description`; ключи эксперимента
   `name`, `overrides`, `requires_neural`, `heavy`, `description`; неизвестный ключ → `ValueError`.
   Относительный `base` ищется рядом с `experiments.yaml`, затем от текущей папки.
+  `description` — гипотеза шага, а не вывод. Ось размера фрагмента — 180 → 100 → 60 (`*_chunk300` убран): самый длинный раздел
+  корпуса 166 слов, поэтому recursive с `chunk_size ≥ 166` даёт ту же нарезку, что 180 (проверяет `tests/test_configs.py`).
+- Новые метрики (в `metric_names`): `stale_citation_rate` (после `invalid_citation_rate`; у вопроса 1.0/0.0 —
+  ответ ссылается на фрагмент документа со `status: archived`, которого нет в evidence; None при отказе и у
+  неотвечаемого) и `n_answerable` (перед `n_questions`). В раннере отвеченный отвечаемый вопрос без ссылок даёт
+  `citation_precision = 0` (отказ — по-прежнему None). Перцентили задержки округляются до 3 знаков;
+  `results.TIMING_KEYS` — единственные недетерминированные поля отчёта.
+- `ExperimentResult` получил поля `score_source: str | None` (шкала порога: rerank/dense/bm25) и
+  `provenance: dict` (`corpus_sha256`, `gold_sha256`, `n_docs`, `n_gold` — `runner.data_fingerprint`);
+  `results.json` — блок `environment` (python, platform, версии пакетов).
+- `leaderboard.md` (вместо одного списка столбцов выше): «Поиск и задержка» — Recall@5, 95% ДИ, MRR (фактически
+  MRR@10), nDCG@5, Hit@1, p50/p95, N «отвечаемые + неотвечаемые»; «Отличие от лидера» — парный bootstrap
+  ΔRecall@5/ΔMRR, «≈», если интервал включает 0 (`metrics.bootstrap_ci`, `paired_bootstrap_diff`: 2000 ресэмплов,
+  seed 0); «Ответы и отказы» — FactRecall (отвеч.), FactRecall, CitationPrecision, Архивные ссылки, Abstention F1,
+  FAR, Порог «шкала: значение»; Recall@5 по типам с n; раздел для confusable. Сетка — описательная абляция на test.
+- `choose_threshold` не менялся (balanced accuracy = индекс Юдена). Известное ограничение: неотвечаемых вопросов
+  на dev единицы–полтора десятка, порог шумный и даёт заметный FAR — поэтому FAR стоит в таблице рядом с FactRecall,
+  а leaderboard печатает размер dev-выборки, на которой подобран порог.
+- `run_experiment` при `eval.judge.enabled: true` → `ValueError`: судья пока не подключён к eval/grid.
+  `cohen_kappa(a, b, weights=None | "linear" | "quadratic")`; `LLMJudge.build_messages` обезвреживает теги
+  `<context>`/`<answer>` в данных (`escape_data_tags`) и ставит напоминание после блока ответа.
 
 **cli**
 - Коды возврата: 0 — успех, 1 — ошибка данных/конфига, 2 — не пройден `--fail-under` (и ошибки аргументов),
   130 — Ctrl+C. `kbrag grid --out` по умолчанию `reports/grid`. `kbrag build-gold --check` только сверяет
   `gold.jsonl` с частями (по записям, а не байтам) и ничего не пишет.
+- `kbrag eval --save-calibration`: до прогона проверяется, что порог вообще подбирается (`abstention.enabled`,
+  `threshold: auto`, задан `calibration_path`), иначе код 1; файл пишется только при пройденном
+  `--fail-under` и только с числовым порогом (порог не подобран → код 1, прежний файл не трогается).
+  Каталог `--out` создаётся до прогона. Имя прогона по умолчанию — имя фактически использованного конфига
+  (`--config`, `$KBRAG_CONFIG` или `configs/default.yaml`).
+- `ask`/`eval`/`serve` сразу проверяют, что для конфига установлены нейросетевые пакеты (`ImportError`
+  с подсказкой про `configs/offline.yaml` → код 1). Упавший старт uvicorn (`sys.exit(3)`) → код 1.
+  stdout/stderr переключаются на UTF-8, если у них кодировка локали (Windows, вывод в pipe/файл).
+
+**infra**
+- Файлы калибровки `reports/calibration*.json` лежат в git (исключение из игнорируемого `reports/*`):
+  свежий клон, `make serve` и Docker-образ сразу умеют отказываться по порогу. `make eval` вызывает
+  `kbrag eval --save-calibration`. CI пересчитывает офлайн-порог и сверяет его с закоммиченным
+  (`scripts/check_calibration.py`: `fingerprint` и `score_source` — точно, `threshold` — с допуском 1e-3):
+  отпечаток не покрывает корпус и эталон. Поменяли поиск, корпус или эталон — `make eval` и коммит файла.
+- Образ сервиса не содержит `data/eval` (эталон нужен только `kbrag eval`).
+- Тесты: autouse-фикстура в `tests/conftest.py` убирает из окружения все `KBRAG_*`, кроме `KBRAG_RUN_NEURAL`;
+  общие фабрики фрагментов — фикстуры `make_context(doc_id, needle, …)` и `make_text_chunk(text, chunk_id)`.
