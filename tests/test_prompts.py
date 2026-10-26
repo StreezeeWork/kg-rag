@@ -12,6 +12,7 @@ from kbrag.generation.prompts import (
     build_messages,
     format_context,
     is_abstention,
+    select_within_budget,
 )
 from kbrag.types import Chunk, Document, ScoredChunk
 
@@ -122,6 +123,32 @@ def test_first_block_is_truncated_when_it_alone_does_not_fit(three_contexts: lis
     assert body.startswith("[1] Документ: Ежегодный оплачиваемый отпуск")
     assert body.endswith("…")
     assert "[2]" not in body
+
+
+def test_select_within_budget_returns_exactly_the_blocks_format_context_shows(
+    three_contexts: list[ScoredChunk],
+) -> None:
+    full = inner(format_context(three_contexts))
+    selected = select_within_budget(three_contexts, max_chars=len(full) - 1)
+
+    assert selected == three_contexts[:2]
+    # Повторный отбор ничего не меняет: пайплайн отбирает фрагменты, а LLMGenerator потом
+    # строит из них промпт с тем же лимитом — набор должен совпасть.
+    assert format_context(selected, max_chars=len(full) - 1) == format_context(
+        three_contexts, max_chars=len(full) - 1
+    )
+    assert select_within_budget(three_contexts, max_chars=len(full)) == three_contexts
+
+
+def test_too_long_first_fragment_is_returned_as_truncated_copy(three_contexts: list[ScoredChunk]) -> None:
+    original = three_contexts[0].chunk.text
+    (only,) = select_within_budget(three_contexts, max_chars=160)
+
+    assert only.chunk.chunk_id == three_contexts[0].chunk.chunk_id
+    assert only.chunk.text.endswith("…") and len(only.chunk.text) < len(original)
+    assert three_contexts[0].chunk.text == original  # исходный фрагмент не тронут
+    assert len(inner(format_context([only], max_chars=160))) <= 160
+    assert format_context([only], max_chars=160) == format_context(three_contexts, max_chars=160)
 
 
 def test_non_positive_limit_is_rejected(three_contexts: list[ScoredChunk]) -> None:

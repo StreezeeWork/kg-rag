@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 
 from kbrag.generation.citations import CITATION_RE
@@ -69,32 +70,53 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
-def format_context(contexts: list[ScoredChunk], max_chars: int = 6000) -> str:
-    """Собирает пронумерованные блоки фрагментов внутри ``<context>…</context>``.
+def select_within_budget(contexts: list[ScoredChunk], max_chars: int = 6000) -> list[ScoredChunk]:
+    """Фрагменты, которые влезают в лимит промпта ``max_chars`` — ровно те, что покажет ``format_context``.
 
     ``max_chars`` ограничивает суммарную длину блоков (без самих тегов), чтобы промпт
     гарантированно влез в окно модели. Блоки идут по убыванию релевантности, поэтому
     при превышении лимита отбрасываем хвост целиком: обрывок фрагмента хуже, чем его
-    отсутствие. Единственное исключение — первый блок: если он один не влезает, его
-    обрезаем, иначе модель осталась бы совсем без контекста.
+    отсутствие. Единственное исключение — первый блок: если он один не влезает, возвращаем
+    копию фрагмента с обрезанным текстом, иначе модель осталась бы совсем без контекста.
+
+    Пайплайн вызывает эту функцию до генерации, поэтому лимит одинаково действует на оба
+    генератора (extractive и LLM), а ссылки ``[n]`` проверяются ровно по показанным фрагментам.
     """
     if max_chars <= 0:
         raise ValueError("max_chars должен быть положительным")
 
-    blocks: list[str] = []
+    selected: list[ScoredChunk] = []
     used = 0
     for number, scored in enumerate(contexts, start=1):
-        block = _format_block(number, scored)
-        extra = len(block) + (len(_BLOCK_SEP) if blocks else 0)
+        extra = len(_format_block(number, scored)) + (len(_BLOCK_SEP) if selected else 0)
         if used + extra > max_chars:
-            if not blocks:
-                blocks.append(_truncate(block, max_chars))
+            if not selected:
+                selected.append(_with_truncated_text(scored, max_chars))
             break
-        blocks.append(block)
+        selected.append(scored)
         used += extra
+    return selected
 
+
+def _with_truncated_text(scored: ScoredChunk, max_chars: int) -> ScoredChunk:
+    # Обрезаем текст так, чтобы блок «шапка + текст» уложился в max_chars. Копия: исходный
+    # фрагмент пайплайн показывает пользователю целиком.
+    header_chars = len(_format_block(1, scored)) - len(_escape_context_tags(scored.chunk.text))
+    text = _truncate(scored.chunk.text, max(max_chars - header_chars, 1))
+    return dataclasses.replace(scored, chunk=dataclasses.replace(scored.chunk, text=text))
+
+
+def format_context(contexts: list[ScoredChunk], max_chars: int = 6000) -> str:
+    """Собирает пронумерованные блоки фрагментов внутри ``<context>…</context>``.
+
+    Какие фрагменты попадут в блоки, решает ``select_within_budget`` (лимит ``max_chars``).
+    """
+    selected = select_within_budget(contexts, max_chars)
+    blocks = [_format_block(number, scored) for number, scored in enumerate(selected, start=1)]
     if not blocks:
         return "<context>\n</context>"
+    if len(blocks[0]) > max_chars:  # лимит меньше даже шапки первого блока
+        blocks[0] = _truncate(blocks[0], max_chars)
     return "<context>\n" + _BLOCK_SEP.join(blocks) + "\n</context>"
 
 

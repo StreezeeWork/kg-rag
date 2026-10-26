@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from kbrag.config import AppConfig, deep_merge
 from kbrag.generation import ABSTAIN_TEXT, ExtractiveGenerator, GenerationResult, Generator, detect_injection
 from kbrag.ingest import chunk_corpus, make_chunker
 from kbrag.pipeline import (
+    CONTEXT_TRUNCATED_FLAG,
     LOW_CONFIDENCE_FLAG,
     RAGPipeline,
     calibration_fingerprint,
@@ -374,6 +376,30 @@ def test_generator_flags_are_added_to_answer_flags(tmp_path: Path, mini_docs: li
     pipeline = build_pipeline(make_cfg(tmp_path), mini_docs, generator=TruncatingGenerator())
 
     assert "answer_truncated" in pipeline.answer(VACATION_Q).flags
+
+
+def test_context_budget_is_applied_once_for_any_generator(tmp_path: Path, mini_docs: list[Document]) -> None:
+    # Лимит меньше суммы фрагментов: генератор видит только начало выдачи, а ссылка на номер,
+    # которого в промпте не было, считается невалидной (раньше она засчитывалась как настоящая).
+    cfg = make_cfg(tmp_path, retrieval={"top_k": 5}, generation={"max_context_chars": 400})
+    spy = SpyGenerator(text="Ответ [1], ещё [5].")
+    pipeline = build_pipeline(cfg, mini_docs, generator=spy)
+
+    answer = pipeline.answer(VACATION_Q)
+
+    seen = spy.calls[0][1]
+    assert 1 <= len(seen) < len(answer.contexts)
+    assert CONTEXT_TRUNCATED_FLAG in answer.flags
+    assert answer.invalid_citations == 1 and [c.index for c in answer.citations] == [1]
+
+    extractive = build_pipeline(cfg, mini_docs).answer(VACATION_Q)
+    numbers = [int(n) for n in re.findall(r"\[(\d+)\]", extractive.text)]
+    assert numbers and max(numbers) <= len(seen)
+
+
+def test_no_truncation_flag_when_everything_fits(tmp_path: Path, mini_docs: list[Document]) -> None:
+    answer = build_pipeline(make_cfg(tmp_path), mini_docs, generator=SpyGenerator()).answer(VACATION_Q)
+    assert CONTEXT_TRUNCATED_FLAG not in answer.flags
 
 
 # ---------------------------------------------------------------------------

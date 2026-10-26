@@ -33,6 +33,7 @@ from kbrag.generation import (
     make_generator,
     parse_citations,
     sanitize_contexts,
+    select_within_budget,
 )
 from kbrag.ingest import chunk_corpus, load_corpus, make_chunker
 from kbrag.retrieval import Reranker, Retriever, build_retriever, make_reranker
@@ -42,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 # Флаг ответа, который поставлен из-за низкой уверенности поиска (а не по решению генератора).
 LOW_CONFIDENCE_FLAG = "low_confidence"
+# Не все найденные фрагменты влезли в лимит generation.max_context_chars: генератор видел только начало выдачи.
+CONTEXT_TRUNCATED_FLAG = "context_truncated"
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +344,13 @@ class RAGPipeline:
         if guardrails.enabled:
             prompt_contexts, injection_flags = sanitize_contexts(contexts, action=guardrails.action)
             flags.extend(injection_flags)
+        # Лимит длины контекста применяем здесь, один раз для любого генератора: extractive и LLM
+        # видят одинаковый набор фрагментов, а ссылки [n] проверяются ровно по показанным —
+        # иначе ссылка LLM на номер, вырезанный из промпта, засчитывалась бы как настоящая.
+        budgeted = select_within_budget(prompt_contexts, self.cfg.generation.max_context_chars)
+        if budgeted != prompt_contexts:
+            flags.append(CONTEXT_TRUNCATED_FLAG)
+        prompt_contexts = budgeted
 
         gen_started = time.perf_counter()
         result = self.generator.generate(question, prompt_contexts)

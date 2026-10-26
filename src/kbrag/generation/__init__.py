@@ -15,6 +15,7 @@ from kbrag.generation.prompts import (
     build_messages,
     format_context,
     is_abstention,
+    select_within_budget,
 )
 
 
@@ -50,4 +51,5 @@ __all__ = [
     "make_generator",
     "parse_citations",
     "sanitize_contexts",
+    "select_within_budget",
 ]
