@@ -6,8 +6,8 @@
   отпечаток данных каждого прогона (``provenance``) и версии Python/пакетов (``environment``);
 * ``per_question/<name>.jsonl`` — ответ и метрики по каждому вопросу (для разбора ошибок);
 * ``leaderboard.md`` — две таблицы (поиск; ответы и отказы), 95% интервалы Recall@5 и
-  отличие каждой строки от лидера (bootstrap), разбивка Recall@5 по типам вопросов,
-  отдельная проверка типа confusable и легенда «как читать».
+  отличие каждой строки от лидера (bootstrap), AUROC источников уверенности для отказа,
+  разбивка Recall@5 по типам вопросов, отдельная проверка типа confusable и легенда «как читать».
 
 Почему таблиц две. Метрики поиска (Recall@5, MRR, …) от порога отказа не зависят. Метрики
 ответа — зависят: отказ на отвечаемый вопрос даёт FactRecall = 0, а порог у каждого
@@ -34,7 +34,7 @@ from typing import Any
 
 from kbrag.eval.dataset import QUESTION_TYPES
 from kbrag.eval.metrics import bootstrap_ci, paired_bootstrap_diff
-from kbrag.eval.results import BY_TYPE_KEY, ExperimentResult
+from kbrag.eval.results import BY_TYPE_KEY, SCORE_SOURCES, ExperimentResult
 
 # (заголовок столбца, имя метрики) — порядок задаёт порядок столбцов.
 # Поиск: от порога отказа не зависит.
@@ -327,6 +327,44 @@ def _by_type_section(done: Sequence[ExperimentResult]) -> list[str]:
     return lines + _table(["Эксперимент", *headers], rows)
 
 
+def _format_auroc(entry: dict | None) -> str:
+    """«0.742 [0.651; 0.826]» — AUROC и его 95% интервал."""
+    if not entry or entry.get("auroc") is None:
+        return MISSING
+    interval = entry.get("ci95")
+    text = format_number(entry["auroc"])
+    return f"{text} [{interval[0]:.3f}; {interval[1]:.3f}]" if interval else text
+
+
+def _auroc_section(done: Sequence[ExperimentResult], split: str) -> list[str]:
+    """Насколько каждый источник уверенности отделяет неотвечаемые вопросы — независимо от порога."""
+    sources = [
+        source for source in SCORE_SOURCES if any(source in r.confidence_auroc.get(split, {}) for r in done)
+    ]
+    if not sources:
+        return []
+    rows = []
+    for r in done:
+        by_source = r.confidence_auroc.get(split, {})
+        cells = []
+        for source in sources:
+            cell = _format_auroc(by_source.get(source))
+            cells.append(f"**{cell}**" if source == r.score_source and cell != MISSING else cell)
+        rows.append([_escape_cell(r.name), *cells])
+    return [
+        "",
+        "## Отделяет ли уверенность поиска неотвечаемые вопросы (AUROC)",
+        "",
+        "AUROC — вероятность того, что у случайного отвечаемого вопроса уверенность выше, чем у случайного"
+        " неотвечаемого: 1.0 — порог мог бы разделить их идеально, 0.5 — не лучше монетки. От порога не"
+        " зависит. В скобках — 95% интервал (bootstrap); жирным — источник, по которому эксперимент"
+        " ставит порог. Неотвечаемых вопросов мало, поэтому интервалы широкие. Источник для порога"
+        " выбирают по dev (значения dev — в `results.json`, поле `confidence_auroc`).",
+        "",
+        *_table(["Эксперимент", *sources], rows),
+    ]
+
+
 def _confusable_section(done: Sequence[ExperimentResult]) -> list[str]:
     """Отдельная проверка типа confusable: Recall@5 не видит путаницы версий документа."""
 
@@ -382,6 +420,7 @@ def render_leaderboard(results: Sequence[ExperimentResult], split: str = "test")
             for r in done
         ]
         lines += _table(header, rows)
+        lines += _auroc_section(done, split)
     else:
         lines.append("Нет завершённых экспериментов.")
 

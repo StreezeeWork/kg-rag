@@ -285,6 +285,11 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   ΔRecall@5/ΔMRR, «≈», если интервал включает 0 (`metrics.bootstrap_ci`, `paired_bootstrap_diff`: 2000 ресэмплов,
   seed 0); «Ответы и отказы» — FactRecall (отвеч.), FactRecall, CitationPrecision, Архивные ссылки, Abstention F1,
   FAR, Порог «шкала: значение»; Recall@5 по типам с n; раздел для confusable. Сетка — описательная абляция на test.
+- `metrics.auroc(confidences, answerable)` / `auroc_ci(...)` (стратифицированный bootstrap, 2000 ресэмплов, seed 0):
+  None/NaN = −∞, ничья = ½, нет одного из классов → None. В строке `per_question` — `confidence_by_source`
+  (максимум `details[source]` по первым `top_k` фрагментам для каждого доступного источника из
+  `results.SCORE_SOURCES`), в `ExperimentResult` — `confidence_auroc: {"dev"|"test": {source: {"auroc", "ci95"}}}`;
+  leaderboard печатает AUROC сплита отчёта, источник порога выделен жирным.
 - `choose_threshold` не менялся (balanced accuracy = индекс Юдена). Известное ограничение: неотвечаемых вопросов
   на dev единицы–полтора десятка, порог шумный и даёт заметный FAR — поэтому FAR стоит в таблице рядом с FactRecall,
   а leaderboard печатает размер dev-выборки, на которой подобран порог.

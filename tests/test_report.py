@@ -342,6 +342,27 @@ def test_leaderboard_threshold_without_score_source_is_plain_number() -> None:
     assert rows[2][-1] == "0.424"
 
 
+def test_leaderboard_auroc_section_marks_threshold_source(results: list[ExperimentResult]) -> None:
+    results[0].confidence_auroc = {"test": {"bm25": {"auroc": 0.6, "ci95": [0.5, 0.7]}}}
+    results[2].confidence_auroc = {
+        "test": {"dense": {"auroc": 0.75, "ci95": [0.6, 0.88]}, "bm25": {"auroc": 0.7, "ci95": None}},
+        "dev": {"dense": {"auroc": 0.1, "ci95": [0.0, 0.2]}},
+    }
+    markdown = render_leaderboard(results, "test")
+
+    assert "## Отделяет ли уверенность поиска неотвечаемые вопросы (AUROC)" in markdown
+    rows = table_rows(markdown, "Эксперимент | dense")
+    assert rows[0] == ["Эксперимент", "dense", "bm25"]
+    # score_source у обоих — dense: жирным выделен именно он; у bm25-строки dense нет вовсе.
+    assert rows[2] == ["hybrid", "**0.750 [0.600; 0.880]**", "0.700"]
+    assert rows[3] == ["bm25", "—", "0.600 [0.500; 0.700]"]
+    assert "0.100" not in markdown  # dev в таблицу test не попадает
+
+
+def test_leaderboard_without_auroc_has_no_auroc_section(results: list[ExperimentResult]) -> None:
+    assert "AUROC" not in render_leaderboard(results, "test").split("## Как читать таблицы")[0]
+
+
 def test_leaderboard_confusable_section(results: list[ExperimentResult]) -> None:
     assert "## Тип confusable" not in render_leaderboard(results)  # нет данных — нет раздела
 

@@ -457,6 +457,31 @@ def choose_threshold(confidences: Sequence[float | None], answerable: Sequence[b
     return best_threshold
 
 
+def _pairwise_wins(confidences: Sequence[float | None], answerable: Sequence[bool]) -> np.ndarray | None:
+    """Матрица «отвечаемый i против неотвечаемого j»: 1 — у i уверенность выше, 0.5 — ничья, 0 — ниже."""
+    if len(confidences) != len(answerable):
+        raise ValueError("confidences и answerable должны быть одной длины")
+    pos = np.asarray([_as_score(c) for c, ans in zip(confidences, answerable, strict=True) if ans])
+    neg = np.asarray([_as_score(c) for c, ans in zip(confidences, answerable, strict=True) if not ans])
+    if pos.size == 0 or neg.size == 0:
+        return None
+    return (pos[:, None] > neg[None, :]) + 0.5 * (pos[:, None] == neg[None, :])
+
+
+def auroc(confidences: Sequence[float | None], answerable: Sequence[bool]) -> float | None:
+    """Насколько уверенность поиска отделяет отвечаемые вопросы от неотвечаемых (ROC AUC).
+
+    Это вероятность того, что у случайного отвечаемого вопроса уверенность выше, чем у случайного
+    неотвечаемого (ничья — половина): 1.0 — какой-то порог разделил бы классы идеально, 0.5 —
+    сигнал не лучше монетки. В отличие от Abstention F1 метрика не зависит от выбранного порога:
+    это потолок того, что вообще можно получить из данной оценки. Поэтому по ней и сравнивают
+    источники уверенности (``bm25`` / ``dense`` / ``rerank``). None/NaN — минус бесконечность
+    (как в ``choose_threshold``). None, если нет одного из классов.
+    """
+    wins = _pairwise_wins(confidences, answerable)
+    return None if wins is None else float(wins.mean())
+
+
 # ---------------------------------------------------------------------------
 # Агрегаты
 # ---------------------------------------------------------------------------
@@ -543,3 +568,30 @@ def paired_bootstrap_diff(
     if interval is None:
         return None
     return sum(diffs) / len(diffs), interval[0], interval[1]
+
+
+def auroc_ci(
+    confidences: Sequence[float | None],
+    answerable: Sequence[bool],
+    n_boot: int = BOOTSTRAP_SAMPLES,
+    alpha: float = 0.05,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float, float] | None:
+    """Bootstrap-интервал для ``auroc`` (по умолчанию 95%).
+
+    Ресэмплирование стратифицированное: отвечаемые и неотвечаемые вопросы вытаскиваются
+    с возвращением **по отдельности**, иначе в выборку мог бы не попасть ни один неотвечаемый.
+    Неотвечаемых вопросов в сплите единицы–десятки, поэтому интервал широкий — это честно.
+    """
+    wins = _pairwise_wins(confidences, answerable)
+    if wins is None:
+        return None
+    rng = np.random.default_rng(seed)
+    n_pos, n_neg = wins.shape
+    values = np.empty(n_boot)
+    for i in range(n_boot):
+        rows = rng.integers(0, n_pos, size=n_pos)
+        cols = rng.integers(0, n_neg, size=n_neg)
+        values[i] = wins[np.ix_(rows, cols)].mean()
+    low, high = np.percentile(values, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return float(low), float(high)

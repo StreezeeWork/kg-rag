@@ -67,10 +67,12 @@ generation:
 
 abstention:
   enabled: true         # отказываемся отвечать, если поиск не уверен: выдумка хуже честного «не знаю»
-  threshold: auto       # порог подбирается на dev; сервису его сохраняет ТОЛЬКО
-                        # `kbrag eval --config configs/default.yaml --save-calibration` (без флага файла не будет,
+  threshold: auto       # порог подбирается на dev; сервису его сохраняет `make eval CONFIG=configs/default.yaml NAME=neural`
+                        # (то же: `kbrag eval --config configs/default.yaml --save-calibration`; без флага файла не будет,
                         # и сервис будет отвечать без отказов по порогу)
-  score_source: auto    # с реранкером уверенность = score cross-encoder (лучше всего отделяет «нет ответа»)
+  score_source: auto    # auto: с реранкером — score cross-encoder, иначе косинус dense. Какой источник лучше отделяет
+                        # «нет ответа», показывает AUROC в leaderboard (поле confidence_auroc в results.json):
+                        # источник выбирают по dev, а не «по умолчанию точнее»
   calibration_path: reports/calibration.json  # сервис читает порог отсюда, если конфиг поиска не менялся
 
 guardrails:

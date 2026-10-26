@@ -42,6 +42,11 @@ LATENCY_METRICS = ("latency_p50_ms", "latency_p95_ms")
 # Поля-замеры времени (в метриках, per_question и index_stats). Только они меняются от
 # прогона к прогону с тем же конфигом: всё остальное в отчёте детерминировано.
 TIMING_KEYS = frozenset({*LATENCY_METRICS, "latency_ms", "index_time_ms"})
+# Источники уверенности поиска (поля ScoredChunk.details), для которых считается AUROC
+# «отвечаемый vs неотвечаемый» — см. ExperimentResult.confidence_auroc.
+SCORE_SOURCES = ("rerank", "dense", "bm25")
+# Сплиты, на которых считается AUROC: dev — там подбирают порог и выбирают источник, test — проверка.
+AUROC_SPLITS = ("dev", "test")
 
 # Поля строки per_question (помимо метрик вопроса под теми же именами, что и в metrics).
 PER_QUESTION_FIELDS = (
@@ -53,6 +58,7 @@ PER_QUESTION_FIELDS = (
     "answer",
     "abstained",
     "confidence",
+    "confidence_by_source",  # уверенность по каждому доступному источнику: {"bm25": 12.3, "dense": 0.61}
     "retrieved",
     "flags",
     "latency_ms",
@@ -89,6 +95,10 @@ class ExperimentResult:
 
     ``provenance`` — отпечаток данных прогона (хэши корпуса и эталона, см.
     ``runner.data_fingerprint``): конфиг хранит только пути, а не содержимое файлов.
+
+    ``confidence_auroc`` — насколько каждый источник уверенности отделяет отвечаемые вопросы
+    от неотвечаемых: ``{"dev": {"dense": {"auroc": 0.74, "ci95": [0.62, 0.85]}, ...}, "test": {...}}``
+    (``metrics.auroc`` / ``metrics.auroc_ci``). Не зависит от порога.
     """
 
     name: str
@@ -100,6 +110,7 @@ class ExperimentResult:
     skipped: str | None = None
     score_source: str | None = None
     provenance: dict = field(default_factory=dict)
+    confidence_auroc: dict = field(default_factory=dict)
 
     @property
     def is_skipped(self) -> bool:
@@ -128,6 +139,7 @@ class ExperimentResult:
             skipped=data.get("skipped"),
             score_source=data.get("score_source"),
             provenance=dict(data.get("provenance") or {}),
+            confidence_auroc=dict(data.get("confidence_auroc") or {}),
         )
 
     @classmethod

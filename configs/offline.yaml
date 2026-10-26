@@ -54,7 +54,9 @@ abstention:
   threshold: auto       # порог подбирается на dev при `kbrag eval`, а не «на глаз»; в файл для сервиса
                         # его пишет только `kbrag eval --config configs/offline.yaml --save-calibration`
   score_source: auto    # без реранкера уверенность берётся из dense-score (он сравним между вопросами)
-  calibration_path: reports/calibration_offline.json  # отдельный файл: калибровка зависит от конфига поиска
+  calibration_path: reports/calibration_offline.json  # отдельный файл: калибровка зависит от конфига поиска.
+                        # Файл лежит в git (его читают свежий клон и Docker-образ). После правки поиска, корпуса или
+                        # эталона обновите его (`make eval`) и закоммитьте: CI сверяет его с пересчитанным порогом
 
 guardrails:
   enabled: true         # документы — данные, а не команды: ищем во фрагментах попытки prompt injection

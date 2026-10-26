@@ -45,6 +45,8 @@ from kbrag.config import AppConfig, load_config
 from kbrag.eval.dataset import GoldItem, evidence_spans, load_gold, validate_gold
 from kbrag.eval.metrics import (
     abstention_report,
+    auroc,
+    auroc_ci,
     choose_threshold,
     citation_precision,
     citation_recall,
@@ -56,9 +58,11 @@ from kbrag.eval.metrics import (
     token_f1,
 )
 from kbrag.eval.results import (
+    AUROC_SPLITS,
     BY_TYPE_KEY,
     GENERATION_METRICS,
     METRIC_SPLITS,
+    SCORE_SOURCES,
     ExperimentResult,
     metric_names,
     retrieval_metric_names,
@@ -67,7 +71,7 @@ from kbrag.generation import ABSTAIN_TEXT
 from kbrag.ingest import load_corpus
 from kbrag.pipeline import LOW_CONFIDENCE_FLAG, RAGPipeline
 from kbrag.retrieval import neural_available
-from kbrag.types import Answer, Citation, Document
+from kbrag.types import Answer, Citation, Document, ScoredChunk
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +132,8 @@ def run_experiment(
 
     # Шаги 4–5: применяем порог и считаем метрики.
     docs_by_id = {doc.doc_id: doc for doc in docs}
-    per_question = [_score_question(run, threshold, pipeline, docs_by_id, k_values) for run in runs]
+    sources = _available_sources(runs)
+    per_question = [_score_question(run, threshold, pipeline, docs_by_id, k_values, sources) for run in runs]
     metrics = _split_metrics(per_question, k_values, cfg.eval.report_split)
     logger.info(
         "Эксперимент %r готов: порог %s, recall@5(test)=%s",
@@ -145,6 +150,7 @@ def run_experiment(
         index_stats=dict(pipeline.index_stats),
         score_source=pipeline.score_source,
         provenance=data_fingerprint(docs, gold),
+        confidence_auroc=confidence_auroc(per_question, sources),
     )
 
 
@@ -225,6 +231,44 @@ def _resolve_eval_threshold(cfg: AppConfig, runs: Sequence[_QuestionRun]) -> flo
     return threshold
 
 
+def _available_sources(runs: Sequence[_QuestionRun]) -> list[str]:
+    """Источники уверенности, которые есть у этого поиска (bm25 — только в bm25/гибриде и т. д.)."""
+    present = {key for run in runs for item in run.answer.contexts for key in item.details}
+    return [source for source in SCORE_SOURCES if source in present]
+
+
+def _confidence_by_source(contexts: Sequence[ScoredChunk], sources: Sequence[str]) -> dict[str, float | None]:
+    """Уверенность по каждому источнику — по тому же правилу, что ``RAGPipeline.confidence`` (максимум)."""
+    result: dict[str, float | None] = {}
+    for source in sources:
+        values = [item.details[source] for item in contexts if source in item.details]
+        result[source] = max(values) if values else None
+    return result
+
+
+def confidence_auroc(rows: Sequence[dict[str, Any]], sources: Sequence[str]) -> dict[str, dict]:
+    """AUROC «отвечаемый vs неотвечаемый» для каждого источника уверенности на dev и test (+ 95% ДИ).
+
+    Зачем: порог отказа берёт уверенность из одного источника (``abstention.score_source``),
+    и выбирать его стоит по данным — по dev, — а не по общему соображению «cross-encoder точнее».
+    """
+    result: dict[str, dict] = {}
+    for split in AUROC_SPLITS:
+        split_rows = [row for row in rows if row["split"] == split]
+        answerable = [row["type"] != "unanswerable" for row in split_rows]
+        by_source: dict[str, dict] = {}
+        for source in sources:
+            scores = [row["confidence_by_source"].get(source) for row in split_rows]
+            value = auroc(scores, answerable)
+            if value is None:
+                continue
+            interval = auroc_ci(scores, answerable)
+            by_source[source] = {"auroc": value, "ci95": list(interval) if interval else None}
+        if by_source:
+            result[split] = by_source
+    return result
+
+
 def _question_metric_names(k_values: Sequence[int]) -> list[str]:
     """Метрики, которые имеют смысл для одного вопроса (остальные — только для сплита)."""
     return [*retrieval_metric_names(k_values), *GENERATION_METRICS]
@@ -236,6 +280,7 @@ def _score_question(
     pipeline: RAGPipeline,
     docs_by_id: dict[str, Document],
     k_values: Sequence[int],
+    sources: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Строка ``per_question``: что спросили, что ответили и метрики этого вопроса."""
     item, answer = run.item, run.answer
@@ -287,6 +332,7 @@ def _score_question(
         "answer": text,
         "abstained": abstained,
         "confidence": answer.confidence,
+        "confidence_by_source": _confidence_by_source(answer.contexts, sources),
         "retrieved": list(run.retrieved_ids),
         "flags": flags,
         "latency_ms": round(latency, 3),

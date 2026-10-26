@@ -10,6 +10,8 @@ import pytest
 
 from kbrag.eval.metrics import (
     abstention_report,
+    auroc,
+    auroc_ci,
     bootstrap_ci,
     choose_threshold,
     citation_precision,
@@ -549,3 +551,32 @@ def test_paired_bootstrap_diff_one_question_out_of_many_is_noise() -> None:
     much_better = [1.0] * 124
     _, low, _ = paired_bootstrap_diff(much_better, b)
     assert low > 0  # 18 решённых вопросов из 124 — уже не шум
+
+
+# ---------------------------------------------------------------------------
+# AUROC уверенности (отделяет ли она неотвечаемые вопросы)
+# ---------------------------------------------------------------------------
+
+
+def test_auroc_counts_pairs_and_ties() -> None:
+    # Пары (отвечаемый, неотвечаемый): 0.9>0.1, 0.9>None, 0.1=0.1 (ничья — половина), 0.1>None.
+    assert auroc([0.9, 0.1, 0.1, None], [True, True, False, False]) == pytest.approx(3.5 / 4)
+    assert auroc([0.2, 0.8], [True, False]) == 0.0  # уверенность «наоборот»
+    assert auroc([0.5, 0.5], [True, False]) == 0.5
+
+
+def test_auroc_needs_both_classes() -> None:
+    assert auroc([0.1, 0.2], [True, True]) is None
+    assert auroc_ci([0.1, 0.2], [False, False]) is None
+    with pytest.raises(ValueError):
+        auroc([0.1], [True, False])
+
+
+def test_auroc_ci_contains_estimate_and_is_reproducible() -> None:
+    rng = np.random.default_rng(1)
+    answerable = [bool(x) for x in rng.integers(0, 2, size=80)]
+    scores = [float(rng.normal(1.0 if ans else 0.0)) for ans in answerable]
+    low, high = auroc_ci(scores, answerable)
+    assert low <= auroc(scores, answerable) <= high
+    assert 0.5 < low < high < 1.0
+    assert auroc_ci(scores, answerable) == (low, high)  # seed фиксирован

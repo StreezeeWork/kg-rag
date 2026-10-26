@@ -98,6 +98,26 @@ def test_result_structure_follows_contract(gold: list[GoldItem], mini_docs: list
         assert set(row) == expected_fields
 
 
+def test_confidence_auroc_is_reported_per_available_source(
+    gold_with_dev_unanswerable: list[GoldItem], mini_docs: list[Document]
+) -> None:
+    # Гибрид: у фрагментов есть и bm25, и dense, реранкера нет — AUROC считается для двух источников.
+    result = run_experiment(
+        make_cfg(retrieval={"mode": "hybrid"}), name="hybrid", gold=gold_with_dev_unanswerable, docs=mini_docs
+    )
+
+    for row in result.per_question:
+        assert set(row["confidence_by_source"]) == {"dense", "bm25"}
+        assert row["confidence_by_source"]["dense"] == row["confidence"]  # score_source: auto → dense
+    assert set(result.confidence_auroc) == {"dev", "test"}
+    for by_source in result.confidence_auroc.values():
+        assert set(by_source) == {"dense", "bm25"}
+        for entry in by_source.values():
+            assert 0.0 <= entry["auroc"] <= 1.0
+            low, high = entry["ci95"]
+            assert low <= entry["auroc"] <= high
+
+
 def test_result_is_json_serializable_and_round_trips(
     tmp_path: Path, gold: list[GoldItem], mini_docs: list[Document]
 ) -> None:
