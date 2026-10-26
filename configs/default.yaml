@@ -35,6 +35,7 @@ retrieval:
   dense:
     embedder: sentence-transformers
     model: intfloat/multilingual-e5-small  # маленькая (118M) многоязычная модель: русский + быстро на CPU
+    revision: 614241f622f53c4eeff9890bdc4f31cfecc418b3  # commit на HF Hub: обновление весов не сдвинет метрики молча
     query_prefix: null    # null → определить по имени модели: e5 обучена с префиксами "query: "/"passage: "
     passage_prefix: null
     batch_size: 32        # сколько текстов кодируем за раз: больше — быстрее, но больше памяти
@@ -49,6 +50,7 @@ retrieval:
 rerank:
   enabled: true         # cross-encoder читает пару «вопрос + фрагмент» целиком — точнее, чем bi-encoder
   model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1  # многоязычный (обучен на mMARCO), лёгкий для CPU
+  revision: 1427fd652930e4ba29e8149678df786c240d8825  # commit на HF Hub (см. retrieval.dense.revision)
   batch_size: 16        # пары «вопрос–фрагмент» за один проход модели
   max_length: 512       # длиннее обрезается: иначе модель падает или работает очень медленно
   device: auto

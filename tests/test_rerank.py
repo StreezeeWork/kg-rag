@@ -162,8 +162,24 @@ def test_auto_device_resolved_lazily(fake_st: types.ModuleType, monkeypatch: pyt
 
 def test_missing_sentence_transformers_gives_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "sentence_transformers", None)
-    with pytest.raises(ImportError, match=r"pip install -e \.\[neural\]"):
+    with pytest.raises(ImportError, match=r"pip install -e \.\[neural\].*configs/offline\.yaml"):
         CrossEncoderReranker("fake-model", device="cpu")
+
+
+def test_make_reranker_passes_configured_revision(fake_st: types.ModuleType) -> None:
+    seen: list[dict] = []
+
+    class RecordingCrossEncoder(FakeCrossEncoder):
+        def __init__(self, model_name: str, max_length=None, device=None, **kwargs) -> None:
+            super().__init__(model_name, max_length=max_length, device=device)
+            seen.append(kwargs)
+
+    fake_st.CrossEncoder = RecordingCrossEncoder
+    pinned = make_reranker(RerankConfig(enabled=True, revision="abc123", device="cpu"))
+    make_reranker(RerankConfig(enabled=True, device="cpu"))
+
+    assert seen == [{"revision": "abc123"}, {}]
+    assert pinned.revision == "abc123"
 
 
 def test_make_reranker_disabled_needs_no_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:

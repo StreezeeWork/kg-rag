@@ -47,6 +47,7 @@ class CrossEncoderReranker(Reranker):
         max_length: int = 512,
         device: str = "auto",
         with_header: bool = True,
+        revision: str | None = None,
     ) -> None:
         try:
             from sentence_transformers import CrossEncoder
@@ -60,8 +61,11 @@ class CrossEncoderReranker(Reranker):
         self.max_length = max_length
         self.device = resolve_device(device)
         self.with_header = with_header
+        self.revision = revision
         # max_length обрезает слишком длинные пары: иначе модель упадёт или будет очень медленной.
-        self.model = CrossEncoder(model_name, max_length=max_length, device=self.device)
+        # revision (commit снапшота на HF Hub) передаём, только если он задан в конфиге.
+        extra = {"revision": revision} if revision else {}
+        self.model = CrossEncoder(model_name, max_length=max_length, device=self.device, **extra)
 
     def rerank(self, query: str, candidates: list[ScoredChunk], top_k: int) -> list[ScoredChunk]:
         if not candidates or top_k <= 0:
@@ -109,4 +113,5 @@ def make_reranker(cfg: RerankConfig, *, with_header: bool = True) -> Reranker | 
         max_length=cfg.max_length,
         device=cfg.device,
         with_header=with_header,
+        revision=cfg.revision,
     )

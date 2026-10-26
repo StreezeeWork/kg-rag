@@ -38,7 +38,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-NEURAL_INSTALL_HINT = "pip install -e .[neural]"
+NEURAL_INSTALL_HINT = (
+    "pip install -e .[neural] (make install-neural) или без нейросетей: --config configs/offline.yaml"
+)
 # Версия формата кэша эмбеддингов (входит в ключ). Увеличьте, если меняется способ получения
 # векторов (нормировка, dtype, состав ключа), — тогда все старые файлы перестанут подхватываться.
 EMBEDDING_CACHE_VERSION = 2
@@ -218,6 +220,7 @@ class SentenceTransformerEmbedder(Embedder):
         batch_size: int = 32,
         device: str = "auto",
         cache_dir: str | None = None,
+        revision: str | None = None,
     ) -> None:
         try:
             import sentence_transformers
@@ -235,11 +238,13 @@ class SentenceTransformerEmbedder(Embedder):
         self.batch_size = batch_size
         self.device = resolve_device(device)
         self.cache_dir = cache_dir
-        self.model = sentence_transformers.SentenceTransformer(model_name, device=self.device)
+        # revision передаём, только если он задан: так работают и старые версии библиотеки, и подмены в тестах.
+        extra = {"revision": revision} if revision else {}
+        self.model = sentence_transformers.SentenceTransformer(model_name, device=self.device, **extra)
         # Ревизия весов (commit снапшота на HF Hub; у локальной папки её нет) и версия библиотеки
         # входят в ключ кэша: обновили модель или sentence-transformers — старые векторы не подхватятся.
         model_card = getattr(self.model, "model_card_data", None)
-        self.model_revision: str = getattr(model_card, "base_model_revision", None) or ""
+        self.model_revision: str = revision or getattr(model_card, "base_model_revision", None) or ""
         self.library_version: str = getattr(sentence_transformers, "__version__", "unknown")
 
     def encode_queries(self, texts: list[str]) -> np.ndarray:
@@ -343,5 +348,6 @@ def make_embedder(cfg: DenseConfig, cache_dir: str | None = None) -> Embedder:
             batch_size=cfg.batch_size,
             device=cfg.device,
             cache_dir=cache_dir,
+            revision=cfg.revision,
         )
     raise ValueError(f"Неизвестный эмбеддер: {cfg.embedder!r}")

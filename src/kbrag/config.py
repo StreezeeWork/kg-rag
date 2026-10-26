@@ -48,6 +48,9 @@ class BM25Config(_Strict):
 class DenseConfig(_Strict):
     embedder: Literal["lsa", "sentence-transformers"] = "lsa"
     model: str = "intfloat/multilingual-e5-small"
+    # Commit снапшота модели на Hugging Face Hub: веса под тем же именем могут обновиться,
+    # и метрики «того же» конфига сдвинутся. None — последняя версия (или та, что уже в кэше).
+    revision: str | None = None
     query_prefix: str | None = None  # None → определить по имени модели (e5: "query: ")
     passage_prefix: str | None = None  # None → определить по имени модели (e5: "passage: ")
     # Подобрано на dev (configs/offline.yaml): при ~260 фрагментах 256 — SVD почти полного ранга ≈ TF-IDF.
@@ -74,6 +77,7 @@ class RetrievalConfig(_Strict):
 class RerankConfig(_Strict):
     enabled: bool = False
     model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    revision: str | None = None  # commit снапшота на HF Hub, как у retrieval.dense.revision
     batch_size: int = 16
     max_length: int = 512
     device: str = "auto"

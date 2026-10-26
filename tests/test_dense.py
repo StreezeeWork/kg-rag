@@ -492,9 +492,28 @@ def test_no_cache_dir_means_no_files_and_queries_never_cached(
 
 def test_missing_sentence_transformers_gives_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "sentence_transformers", None)  # import → ImportError
-    with pytest.raises(ImportError, match=r"pip install -e \.\[neural\]"):
+    with pytest.raises(ImportError, match=r"pip install -e \.\[neural\].*configs/offline\.yaml"):
         SentenceTransformerEmbedder("intfloat/multilingual-e5-small")
     assert neural_available() is False
+
+
+def test_configured_revision_is_passed_to_the_model(fake_st: types.ModuleType, tmp_path: Path) -> None:
+    # Ревизия из конфига фиксирует веса модели: она уходит в SentenceTransformer и в ключ кэша.
+    seen: list[dict] = []
+
+    class RecordingModel(FakeSentenceTransformer):
+        def __init__(self, model_name: str, device: str | None = None, **kwargs) -> None:
+            super().__init__(model_name, device=device)
+            seen.append(kwargs)
+
+    fake_st.SentenceTransformer = RecordingModel
+    cfg = DenseConfig(embedder="sentence-transformers", model="model-a", revision="abc123", device="cpu")
+    pinned = make_embedder(cfg, cache_dir=str(tmp_path))
+    unpinned = make_embedder(cfg.model_copy(update={"revision": None}), cache_dir=str(tmp_path))
+
+    assert seen == [{"revision": "abc123"}, {}]
+    assert pinned.model_revision == "abc123"
+    assert pinned.cache_path(["текст"]) != unpinned.cache_path(["текст"])
 
 
 def test_neural_available_with_fake_module(fake_st: types.ModuleType) -> None:
