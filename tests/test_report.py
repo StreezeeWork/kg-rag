@@ -46,8 +46,20 @@ def make_result(name: str, recall5: float, by_type: dict | None = None, **overri
             "by_type": by_type or {},
         },
         per_question=[
-            {"qid": "t-001", "type": "numeric", "answer": "28 календарных дней [1].", "recall@5": 1.0},
-            {"qid": "t-005", "type": "unanswerable", "answer": "В базе знаний нет ответа.", "recall@5": None},
+            {
+                "qid": "t-001",
+                "type": "numeric",
+                "split": "test",
+                "answer": "28 календарных дней [1].",
+                "recall@5": 1.0,
+            },
+            {
+                "qid": "t-005",
+                "type": "unanswerable",
+                "split": "test",
+                "answer": "В базе знаний нет ответа.",
+                "recall@5": None,
+            },
         ],
         threshold=0.4242,
         index_stats={"n_docs": 4, "n_chunks": 12},
@@ -220,15 +232,61 @@ def test_leaderboard_search_table(tmp_path: Path, results: list[ExperimentResult
     rows = table_rows(section(text, "Поиск и задержка"), "Эксперимент")
     header, separator, body = rows[0], rows[1], rows[2:]
 
-    assert header == ["Эксперимент", "Recall@5", "MRR", "nDCG@5", "Hit@1", "p50, мс", "p95, мс", "N"]
+    assert header == [
+        "Эксперимент",
+        "Recall@5",
+        "Recall@5, 95% ДИ",
+        "MRR",
+        "nDCG@5",
+        "Hit@1",
+        "p50, мс",
+        "p95, мс",
+        "N",
+    ]
     assert set("".join(separator)) <= set("-:|")  # строка-разделитель markdown-таблицы
     # Сортировка по Recall@5: hybrid (0.9) выше bm25 (0.8); пропущенного эксперимента в таблице нет.
     assert [row[0] for row in body] == ["hybrid", "bm25"]
     hybrid = dict(zip(header, body[0], strict=True))
     assert hybrid["Recall@5"] == "0.900"
+    assert hybrid["Recall@5, 95% ДИ"] == "1.000–1.000"  # из per_question: один отвечаемый вопрос
     assert hybrid["MRR"] == "0.333"
     assert hybrid["p50, мс"] == "12.346"
     assert hybrid["N"] == "3 + 1"  # отвечаемые + неотвечаемые: N для поиска — первое число
+
+
+def _with_answers(name: str, recalls: list[float]) -> ExperimentResult:
+    """Эксперимент, у которого в per_question заданы Recall@5 и MRR по вопросам q-0, q-1, …"""
+    result = make_result(name, sum(recalls) / len(recalls))
+    result.per_question = [
+        {"qid": f"q-{i}", "split": "test", "recall@5": value, "mrr": value} for i, value in enumerate(recalls)
+    ]
+    return result
+
+
+def test_leader_diff_marks_noise_with_approx_sign() -> None:
+    # Регрессия: строки сортировались по точечному Recall@5 без интервалов, и «победа»
+    # в один вопрос из 124 выглядела как вывод.
+    leader = _with_answers("leader", [1.0] * 107 + [0.0] * 17)
+    one_question_behind = _with_answers("close", [1.0] * 106 + [0.0] * 18)
+    far_behind = _with_answers("far", [1.0] * 80 + [0.0] * 44)
+    text = render_leaderboard([far_behind, one_question_behind, leader])
+
+    rows = table_rows(section(text, "Отличие от лидера (leader)"), "Эксперимент")
+    assert rows[0] == ["Эксперимент", "ΔRecall@5 [95% ДИ]", "ΔMRR [95% ДИ]"]
+    cells = {row[0]: row[1] for row in rows[2:]}
+    assert cells["close"].startswith("-0.008 [") and cells["close"].endswith("≈")
+    assert cells["far"].startswith("-0.218 [") and not cells["far"].endswith("≈")
+    search = dict(zip(table_rows(text, "Эксперимент")[0], table_rows(text, "Эксперимент")[2], strict=True))
+    low, high = (float(x) for x in search["Recall@5, 95% ДИ"].split("–"))
+    assert low < 107 / 124 < high
+
+
+def test_leader_diff_is_skipped_without_per_question(results: list[ExperimentResult]) -> None:
+    for result in results:
+        result.per_question = []  # например, results.json без JSONL-файлов
+    text = render_leaderboard(results)
+    assert "## Отличие от лидера" not in text
+    assert table_rows(section(text, "Поиск и задержка"), "Эксперимент")[2][2] == "—"
 
 
 def test_leaderboard_answer_table_shows_threshold_effects(

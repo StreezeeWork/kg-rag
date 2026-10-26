@@ -10,7 +10,12 @@
 #   * heavy: true — большие модели (долго на CPU); запускаются только по явному флагу.
 #
 # Эксперименты выстроены «лесенкой» (абляция): каждый отличается от одного из предыдущих
-# ровно ОДНИМ изменением, поэтому разница в метриках объясняется именно им. Пары для сравнения:
+# ровно ОДНИМ изменением, поэтому разница в метриках объясняется именно им. description — это
+# ГИПОТЕЗА, которую шаг проверяет, а не готовый вывод. Вывод делают по разнице с 95% интервалом:
+# в leaderboard — раздел «Отличие от лидера», для пары шагов лесенки — paired_bootstrap_diff
+# (src/kbrag/eval/metrics.py) по per_question. Интервал включает 0 — гипотеза данными не
+# подтверждена (разница в пределах шума). Метрики ответа (FactRecall) сравнивают только вместе
+# с FAR: порог отказа у каждого эксперимента свой. Пары для сравнения:
 #   bm25_fixed → bm25_recursive_noheader (нарезка) → bm25_recursive (заголовки);
 #   bm25_recursive → lsa_dense (тип поиска) → hybrid_bm25_lsa (гибрид) → *_weighted (слияние);
 #   lsa_dense → e5_dense и hybrid_bm25_lsa → hybrid_bm25_e5 (модель эмбеддингов);
@@ -29,7 +34,7 @@ base: configs/offline.yaml
 experiments:
   # --- Лексический поиск: как нарезка и заголовки влияют на BM25 -------------------
   - name: bm25_fixed
-    description: "Базовая линия: окна по 180 слов с перекрытием 30 + чистый BM25 без заголовков"
+    description: "Базовая линия (не гипотеза): окна по 180 слов с перекрытием 30 + чистый BM25 без заголовков"
     requires_neural: false
     heavy: false
     overrides:
@@ -37,7 +42,7 @@ experiments:
       retrieval: {mode: bm25}
 
   - name: bm25_recursive_noheader
-    description: "Нарезка по структуре markdown лучше окон фиксированного размера"
+    description: "Гипотеза: нарезка по структуре markdown лучше окон фиксированного размера"
     requires_neural: false
     heavy: false
     overrides:
@@ -45,7 +50,7 @@ experiments:
       retrieval: {mode: bm25}
 
   - name: bm25_recursive
-    description: "Заголовок документа и раздела в тексте фрагмента помогает BM25 найти нужный раздел"
+    description: "Гипотеза: заголовок документа и раздела в тексте фрагмента помогает BM25 найти нужный раздел"
     requires_neural: false
     heavy: false
     overrides:
@@ -54,21 +59,21 @@ experiments:
 
   # --- Плотный поиск без нейросетей и гибрид -------------------------------------
   - name: lsa_dense
-    description: "LSA-эмбеддинги ловят перефразы лучше BM25, но проигрывают на точных терминах и кодах"
+    description: "Гипотеза: LSA-эмбеддинги ловят перефразы лучше BM25, но проигрывают на точных терминах и кодах"
     requires_neural: false
     heavy: false
     overrides:
       retrieval: {mode: dense, dense: {embedder: lsa}}
 
   - name: hybrid_bm25_lsa
-    description: "Гибрид BM25 + LSA со слиянием RRF лучше каждого компонента по отдельности"
+    description: "Гипотеза: гибрид BM25 + LSA со слиянием RRF лучше каждого компонента по отдельности"
     requires_neural: false
     heavy: false
     overrides:
       retrieval: {mode: hybrid, dense: {embedder: lsa}, hybrid: {fusion: rrf}}
 
   - name: hybrid_bm25_lsa_weighted
-    description: "Взвешенная сумма нормированных score (0.6 BM25 / 0.4 LSA) не хуже слияния по рангам RRF"
+    description: "Гипотеза: взвешенная сумма нормированных score (0.6 BM25 / 0.4 LSA) не хуже слияния по рангам RRF"
     requires_neural: false
     heavy: false
     overrides:
@@ -79,7 +84,7 @@ experiments:
 
   # --- Нейросетевые эмбеддинги и реранкер ----------------------------------------
   - name: e5_dense
-    description: "Многоязычные нейросетевые эмбеддинги e5 заметно лучше LSA на перефразах"
+    description: "Гипотеза: многоязычные нейросетевые эмбеддинги e5 заметно лучше LSA на перефразах"
     requires_neural: true
     heavy: false
     overrides:
@@ -88,7 +93,7 @@ experiments:
         dense: {embedder: sentence-transformers, model: intfloat/multilingual-e5-small}
 
   - name: hybrid_bm25_e5
-    description: "BM25 добавляет к e5 точность на ключевых словах и кодах — гибрид лучше e5 в одиночку"
+    description: "Гипотеза: BM25 добавляет к e5 точность на ключевых словах и кодах — гибрид лучше e5 в одиночку"
     requires_neural: true
     heavy: false
     overrides:
@@ -98,7 +103,7 @@ experiments:
         hybrid: {fusion: rrf}
 
   - name: hybrid_bm25_e5_rerank
-    description: "Cross-encoder поверх 30 гибридных кандидатов поднимает нужный фрагмент в top-1 и улучшает отказы"
+    description: "Гипотеза: cross-encoder поверх 30 гибридных кандидатов поднимает нужный фрагмент в top-1 и улучшает отказы"
     requires_neural: true
     heavy: false
     overrides:
@@ -119,7 +124,7 @@ experiments:
   # поэтому такого эксперимента в сетке нет. Урок: гиперпараметр надо сверять с данными.
   # tests/test_configs.py проверяет, что каждый шаг этой оси действительно меняет нарезку.
   - name: hybrid_bm25_e5_rerank_chunk100
-    description: "Мелкие фрагменты (100 слов) точнее для поиска, но могут разрывать факт и его контекст"
+    description: "Гипотеза: мелкие фрагменты (100 слов) точнее для поиска, но могут разрывать факт и его контекст"
     requires_neural: true
     heavy: false
     overrides:
@@ -133,7 +138,7 @@ experiments:
       rerank: {enabled: true, model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
 
   - name: hybrid_bm25_e5_rerank_chunk60
-    description: "Совсем мелкие фрагменты (60 слов) режут разделы на абзацы и предложения: продолжает тренд 180 → 100"
+    description: "Гипотеза: совсем мелкие фрагменты (60 слов), нарезанные из абзацев и предложений, продолжают тренд 180 → 100"
     requires_neural: true
     heavy: false
     overrides:
@@ -148,7 +153,7 @@ experiments:
 
   # --- Тяжёлые модели: окупается ли размер ---------------------------------------
   - name: bge_m3_hybrid_rerank
-    description: "Крупные BGE-M3 и bge-reranker-v2-m3 дают прирост качества, оправдывающий их размер и задержку"
+    description: "Гипотеза: крупные BGE-M3 и bge-reranker-v2-m3 дают прирост качества, оправдывающий их размер и задержку"
     requires_neural: true
     heavy: true
     overrides:

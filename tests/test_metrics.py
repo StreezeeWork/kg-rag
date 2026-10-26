@@ -10,6 +10,7 @@ import pytest
 
 from kbrag.eval.metrics import (
     abstention_report,
+    bootstrap_ci,
     choose_threshold,
     citation_precision,
     citation_recall,
@@ -21,6 +22,7 @@ from kbrag.eval.metrics import (
     mean_ignore_none,
     mrr,
     ndcg_at_k,
+    paired_bootstrap_diff,
     percentile,
     precision_at_k,
     recall_at_k,
@@ -490,3 +492,45 @@ def test_mean_ignore_none() -> None:
     assert mean_ignore_none([None, None]) is None
     assert mean_ignore_none([]) is None
     assert mean_ignore_none([0.0]) == 0.0  # ноль — это значение, а не «нет данных»
+
+
+# ---------------------------------------------------------------------------
+# Доверительные интервалы
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_ci_is_deterministic_and_contains_the_mean() -> None:
+    values = [1.0] * 100 + [0.0] * 24 + [None]  # Recall@5 ≈ 0.806 на 124 вопросах
+    interval = bootstrap_ci(values)
+    assert interval == bootstrap_ci(values)  # seed фиксирован — отчёт воспроизводим
+    low, high = interval
+    assert low < 100 / 124 < high
+    assert 0.05 < high - low < 0.2  # на ~120 вопросах интервал шириной около ±0.07
+
+
+def test_bootstrap_ci_edge_cases() -> None:
+    assert bootstrap_ci([]) is None
+    assert bootstrap_ci([None, None]) is None
+    assert bootstrap_ci([0.5, 0.5, 0.5]) == (0.5, 0.5)  # нет разброса — интервал вырожден
+
+
+def test_paired_bootstrap_diff_identical_and_shifted() -> None:
+    a = [1.0, 0.0, 0.5, 1.0, 0.0]
+    assert paired_bootstrap_diff(a, a) == (0.0, 0.0, 0.0)
+    shifted = [x + 0.25 for x in a]
+    assert paired_bootstrap_diff(shifted, a) == pytest.approx((0.25, 0.25, 0.25))
+    assert paired_bootstrap_diff([None, 1.0], [0.0, None]) is None  # нет общих вопросов
+    with pytest.raises(ValueError):
+        paired_bootstrap_diff([1.0], [1.0, 0.0])
+
+
+def test_paired_bootstrap_diff_one_question_out_of_many_is_noise() -> None:
+    # Регрессия к находке «нет значимости»: 0.863 против 0.855 — это 1 вопрос из 124.
+    b = [1.0] * 106 + [0.0] * 18
+    a = [1.0] * 107 + [0.0] * 17  # на один решённый вопрос больше
+    diff, low, high = paired_bootstrap_diff(a, b)
+    assert diff == pytest.approx(1 / 124)
+    assert low <= 0 <= high  # интервал включает 0 — «победа» в пределах шума
+    much_better = [1.0] * 124
+    _, low, _ = paired_bootstrap_diff(much_better, b)
+    assert low > 0  # 18 решённых вопросов из 124 — уже не шум

@@ -4,8 +4,9 @@
 
 * ``results.json`` — конфиги, метрики, пороги и статистика индекса всех экспериментов;
 * ``per_question/<name>.jsonl`` — ответ и метрики по каждому вопросу (для разбора ошибок);
-* ``leaderboard.md`` — две таблицы (поиск; ответы и отказы), разбивка Recall@5 по типам
-  вопросов, отдельная проверка типа confusable и легенда «как читать».
+* ``leaderboard.md`` — две таблицы (поиск; ответы и отказы), 95% интервалы Recall@5 и
+  отличие каждой строки от лидера (bootstrap), разбивка Recall@5 по типам вопросов,
+  отдельная проверка типа confusable и легенда «как читать».
 
 Почему таблиц две. Метрики поиска (Recall@5, MRR, …) от порога отказа не зависят. Метрики
 ответа — зависят: отказ на отвечаемый вопрос даёт FactRecall = 0, а порог у каждого
@@ -29,12 +30,15 @@ from pathlib import Path
 from typing import Any
 
 from kbrag.eval.dataset import QUESTION_TYPES
+from kbrag.eval.metrics import bootstrap_ci, paired_bootstrap_diff
 from kbrag.eval.results import BY_TYPE_KEY, ExperimentResult
 
 # (заголовок столбца, имя метрики) — порядок задаёт порядок столбцов.
 # Поиск: от порога отказа не зависит.
+RECALL_CI = "recall@5:ci95"  # псевдо-метрика: интервал считается в отчёте из per_question
 SEARCH_COLUMNS: tuple[tuple[str, str], ...] = (
     ("Recall@5", "recall@5"),
+    ("Recall@5, 95% ДИ", RECALL_CI),
     ("MRR", "mrr"),
     ("nDCG@5", "ndcg@5"),
     ("Hit@1", "hit@1"),
@@ -50,6 +54,11 @@ ANSWER_COLUMNS: tuple[tuple[str, str], ...] = (
     ("Abstention F1", "abstain_f1"),
     ("FAR", "false_abstention_rate"),
 )
+# Что сравниваем с лидером парным bootstrap (раздел «Отличие от лидера»).
+DIFF_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("ΔRecall@5 [95% ДИ]", "recall@5"),
+    ("ΔMRR [95% ДИ]", "mrr"),
+)
 SORT_METRIC = "recall@5"
 CONFUSABLE_TYPE = "confusable"
 MISSING = "—"
@@ -58,6 +67,8 @@ _LEGEND = """## Как читать таблицы
 
 Поиск:
 - **Recall@5** — доля доказательств (цитат из эталона), найденных среди первых 5 фрагментов. Главная метрика поиска.
+- **Recall@5, 95% ДИ** — доверительный интервал (bootstrap по вопросам, seed фиксирован): где могла бы оказаться метрика на другом наборе вопросов того же рода. Если интервалы строк сильно перекрываются, порядок строк — не вывод.
+- **Отличие от лидера** — разница «эксперимент − первая строка» на тех же вопросах с 95% интервалом (парный bootstrap); «≈» — интервал включает 0, то есть по этим данным строки неотличимы.
 - **MRR** — 1 / позиция первого релевантного фрагмента, усреднённое по вопросам. Считается по всей оцениваемой выдаче (max(k_values, top_k) фрагментов, по умолчанию 10), то есть фактически это MRR@10.
 - **nDCG@5** — учитывает позиции всех найденных доказательств: чем выше, тем лучше.
 - **Hit@1** — доля вопросов, где первый же фрагмент релевантен.
@@ -221,6 +232,57 @@ def _threshold_note(done: Sequence[ExperimentResult], split: str) -> list[str]:
     ]
 
 
+def _split_rows(result: ExperimentResult, split: str) -> list[dict]:
+    """Строки per_question нужного сплита (``all`` — все)."""
+    return [row for row in result.per_question if split == "all" or row.get("split") == split]
+
+
+def _search_cell(result: ExperimentResult, metric: str, split: str) -> str:
+    if metric == RECALL_CI:
+        interval = bootstrap_ci([row.get(SORT_METRIC) for row in _split_rows(result, split)])
+        return MISSING if interval is None else f"{interval[0]:.3f}–{interval[1]:.3f}"
+    return format_number(result.metric(metric, split))
+
+
+def _format_diff(leader: ExperimentResult, other: ExperimentResult, metric: str, split: str) -> str:
+    """«-0.012 [-0.040; +0.016] ≈»: разница other − leader на общих вопросах и её интервал."""
+    other_by_qid = {row.get("qid"): row.get(metric) for row in _split_rows(other, split)}
+    leader_rows = _split_rows(leader, split)
+    diff = paired_bootstrap_diff(
+        [other_by_qid.get(row.get("qid")) for row in leader_rows],
+        [row.get(metric) for row in leader_rows],
+    )
+    if diff is None:
+        return MISSING
+    mean, low, high = diff
+    mark = " ≈" if low <= 0 <= high else ""
+    return f"{mean:+.3f} [{low:+.3f}; {high:+.3f}]{mark}"
+
+
+def _leader_diff_section(done: Sequence[ExperimentResult], split: str) -> list[str]:
+    """Насколько каждый эксперимент отличается от первой строки — с поправкой на шум."""
+    if len(done) < 2:
+        return []
+    leader = done[0]
+    rows = [
+        [_escape_cell(r.name)] + [_format_diff(leader, r, metric, split) for _, metric in DIFF_COLUMNS]
+        for r in done[1:]
+    ]
+    if all(cell == MISSING for row in rows for cell in row[1:]):
+        return []  # старый отчёт без per_question — сравнивать не по чему
+    return [
+        "",
+        f"## Отличие от лидера ({_escape_cell(leader.name)})",
+        "",
+        "Разница «эксперимент − лидер» на тех же вопросах и её 95% доверительный интервал (парный"
+        " bootstrap по вопросам). «≈» — интервал включает 0: по этим данным строки неотличимы, и их"
+        " порядок в таблице задан шумом. Сравнений много, поэтому одиночный результат у самой"
+        " границы интервала — ещё не твёрдый вывод.",
+        "",
+        *_table(["Эксперимент", *(title for title, _ in DIFF_COLUMNS)], rows),
+    ]
+
+
 def _by_type_section(done: Sequence[ExperimentResult]) -> list[str]:
     types = _types_in_report(done)
     if not types:
@@ -291,11 +353,12 @@ def render_leaderboard(results: Sequence[ExperimentResult], split: str = "test")
         header = ["Эксперимент"] + [title for title, _ in SEARCH_COLUMNS] + ["N"]
         rows = [
             [_escape_cell(r.name)]
-            + [format_number(r.metric(metric, split)) for _, metric in SEARCH_COLUMNS]
+            + [_search_cell(r, metric, split) for _, metric in SEARCH_COLUMNS]
             + [_format_n(r.metrics.get(split, {}))]
             for r in done
         ]
         lines += _table(header, rows)
+        lines += _leader_diff_section(done, split)
 
         lines += ["", "## Ответы и отказы (зависят от порога отказа)", "", *_threshold_note(done, split)]
         header = ["Эксперимент"] + [title for title, _ in ANSWER_COLUMNS] + ["Порог"]

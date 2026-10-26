@@ -1,7 +1,8 @@
-"""Метрики качества RAG: поиск, генерация, отказы.
+"""Метрики качества RAG: поиск, генерация, отказы, доверительные интервалы.
 
-Все функции чистые (без состояния и случайности), поэтому их легко проверить
-на примерах, посчитанных руками, — см. ``tests/test_metrics.py``.
+Все функции чистые и детерминированные, поэтому их легко проверить на примерах,
+посчитанных руками, — см. ``tests/test_metrics.py``. Случайность есть только в bootstrap,
+и там seed фиксирован: один и тот же вход всегда даёт один и тот же интервал.
 
 Как устроены метрики поиска. Для одного вопроса строится **матрица покрытия**
 ``coverage[i][j]`` — покрывает ли i-й найденный фрагмент j-е доказательство (evidence).
@@ -20,6 +21,8 @@ import math
 import re
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
+
+import numpy as np
 
 from kbrag.eval.dataset import Span, is_relevant
 from kbrag.text import STOPWORDS, stem, tokenize
@@ -468,3 +471,63 @@ def mean_ignore_none(values: Sequence[float | None]) -> float | None:
     """Среднее без None (None = «метрика к вопросу неприменима»); пусто → None."""
     present = [float(v) for v in values if v is not None]
     return sum(present) / len(present) if present else None
+
+
+# ---------------------------------------------------------------------------
+# Доверительные интервалы (bootstrap)
+# ---------------------------------------------------------------------------
+#
+# Зачем: в test ~120 отвечаемых вопросов, и один вопрос — это почти 0.01 Recall@5.
+# Разница 0.863 против 0.855 между двумя строками leaderboard — один вопрос, то есть шум.
+# Bootstrap отвечает на вопрос «как сильно гуляла бы метрика на другом наборе вопросов
+# того же рода»: много раз вытаскиваем вопросы с возвращением и смотрим разброс среднего.
+
+BOOTSTRAP_SAMPLES = 2000
+BOOTSTRAP_SEED = 0
+
+
+def bootstrap_ci(
+    values: Sequence[float | None],
+    n_boot: int = BOOTSTRAP_SAMPLES,
+    alpha: float = 0.05,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float, float] | None:
+    """Перцентильный bootstrap-интервал для среднего (по умолчанию 95%); None пропускаются.
+
+    Возвращает ``(нижняя, верхняя)`` границы или None, если значений нет. Интервал не обязан
+    быть симметричным: около 1.0 верхняя граница упирается в потолок, поэтому пишем
+    «0.80–0.92», а не «0.86 ± 0.06».
+    """
+    data = np.asarray([float(v) for v in values if v is not None])
+    if data.size == 0:
+        return None
+    rng = np.random.default_rng(seed)
+    means = data[rng.integers(0, data.size, size=(n_boot, data.size))].mean(axis=1)
+    low, high = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return float(low), float(high)
+
+
+def paired_bootstrap_diff(
+    a: Sequence[float | None],
+    b: Sequence[float | None],
+    n_boot: int = BOOTSTRAP_SAMPLES,
+    alpha: float = 0.05,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float, float, float] | None:
+    """Разница средних ``a − b`` на одних и тех же вопросах и её bootstrap-интервал.
+
+    ``a[i]`` и ``b[i]`` — метрика двух систем на i-м вопросе; пары с None пропускаются.
+    Парный bootstrap ресэмплирует вопросы, а не системы по отдельности: трудный вопрос
+    трудный для обеих, и эта общая часть разброса сокращается. Поэтому парное сравнение
+    чувствительнее, чем «пересекаются ли два отдельных интервала».
+
+    Возвращает ``(разница, нижняя, верхняя)`` или None, если общих вопросов нет. Если интервал
+    включает 0, данных недостаточно, чтобы сказать, какая система лучше.
+    """
+    if len(a) != len(b):
+        raise ValueError("a и b должны быть одной длины (одни и те же вопросы)")
+    diffs = [float(x) - float(y) for x, y in zip(a, b, strict=True) if x is not None and y is not None]
+    interval = bootstrap_ci(diffs, n_boot=n_boot, alpha=alpha, seed=seed)
+    if interval is None:
+        return None
+    return sum(diffs) / len(diffs), interval[0], interval[1]
