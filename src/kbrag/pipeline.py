@@ -245,7 +245,8 @@ class RAGPipeline:
             cfg,
             retriever=retriever,
             generator=make_generator(cfg.generation),
-            reranker=make_reranker(cfg.rerank),
+            # Реранкер должен видеть тот же текст фрагмента, что и индекс (с заголовком или без).
+            reranker=make_reranker(cfg.rerank, with_header=cfg.chunking.with_header),
             threshold=resolve_threshold(cfg),
             docs=list(docs),
             chunks=chunks,

@@ -69,7 +69,7 @@ data/eval/gold.jsonl ──► eval.runner (dev: калибровка порог
 `retrieval/rerank.py`
 - `class Reranker(ABC)`: `name: str`; `rerank(self, query: str, candidates: list[ScoredChunk], top_k: int) -> list[ScoredChunk]`.
 - `CrossEncoderReranker(model_name: str, batch_size: int = 16, max_length: int = 512, device: str = "auto", with_header: bool = True)`, `name = "rerank"` — `sentence_transformers.CrossEncoder`; новые `ScoredChunk(chunk, score, source="rerank", details={**old.details, "rerank": s, "pre_rerank": old.score})`.
-- `make_reranker(cfg: RerankConfig) -> Reranker | None` (None, если `enabled: false`).
+- `make_reranker(cfg: RerankConfig, *, with_header: bool = True) -> Reranker | None` (None, если `enabled: false`); пайплайн передаёт `with_header=cfg.chunking.with_header`.
 
 `retrieval/factory.py`
 - `build_retriever(cfg: AppConfig) -> Retriever` — `bm25` → `BM25Retriever`; `dense` → `DenseRetriever(make_embedder(...))`; `hybrid` → `HybridRetriever([bm25, dense], …, candidates_k=cfg.retrieval.candidates_k)`.

@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -25,7 +27,7 @@ from kbrag.pipeline import (
     resolve_score_source,
     save_calibration,
 )
-from kbrag.retrieval import Reranker, build_retriever
+from kbrag.retrieval import CrossEncoderReranker, Reranker, build_retriever
 from kbrag.types import Document, ScoredChunk
 
 VACATION_Q = "Сколько календарных дней длится ежегодный отпуск?"
@@ -116,6 +118,30 @@ def test_from_config_builds_index_stats(tmp_path: Path, mini_docs: list[Document
     assert stats["index_time_ms"] >= 0.0
     assert isinstance(pipeline.generator, ExtractiveGenerator)
     assert pipeline.reranker is None
+
+
+@pytest.mark.parametrize("with_header", [False, True])
+def test_from_config_passes_chunking_header_setting_to_reranker(
+    tmp_path: Path, mini_docs: list[Document], monkeypatch: pytest.MonkeyPatch, with_header: bool
+) -> None:
+    # Абляция «без заголовков» честна, только если и реранкер оценивает фрагмент без них.
+    class FakeCrossEncoder:
+        def __init__(self, model_name: str, **kwargs) -> None:
+            self.model_name = model_name
+
+    fake_st = types.ModuleType("sentence_transformers")
+    fake_st.CrossEncoder = FakeCrossEncoder
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_st)
+    cfg = make_cfg(
+        tmp_path,
+        chunking={"with_header": with_header},
+        rerank={"enabled": True, "model": "fake-cross-encoder", "device": "cpu"},
+    )
+
+    pipeline = RAGPipeline.from_config(cfg, docs=mini_docs)
+
+    assert isinstance(pipeline.reranker, CrossEncoderReranker)
+    assert pipeline.reranker.with_header is with_header
 
 
 def test_from_config_loads_corpus_dir_when_docs_not_given(
