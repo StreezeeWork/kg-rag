@@ -10,6 +10,7 @@ import re
 import threading
 import unicodedata
 from functools import lru_cache
+from typing import Literal, get_args
 
 import snowballstemmer
 
@@ -18,6 +19,10 @@ _WS_RE = re.compile(r"\s+")
 _WORD_RE = re.compile(r"[0-9a-zа-я]+(?:[-.][0-9a-zа-я]+)*")
 _CYRILLIC_RE = re.compile(r"[а-я]")
 _LATIN_RE = re.compile(r"[a-z]")
+_COMPOUND_SEP_RE = re.compile(r"[-.]")
+# Как BM25 обращается с составными токенами («vpn-шлюз»): см. analyze(split_compounds=...).
+SplitCompounds = Literal["none", "mixed", "all"]
+SPLIT_COMPOUNDS_MODES: tuple[str, ...] = get_args(SplitCompounds)
 # Сокращения, после которых точка — не конец предложения, хотя дальше заглавная буква или цифра:
 # «ул. Облачная, д. 7», «г. Казань», «см. Политику паролей», «п. 3», «ст. 81», «рис. 2», «табл. 1».
 # Без этого extractive-ответ обрывался на «…во дворе офиса на ул.». Список короткий намеренно:
@@ -91,12 +96,40 @@ def stem(token: str) -> str:
     return token
 
 
-def analyze(text: str, remove_stopwords: bool = True) -> list[str]:
-    """Полный анализатор: токенизация → удаление стоп-слов → стемминг."""
+def analyze(text: str, remove_stopwords: bool = True, split_compounds: SplitCompounds = "none") -> list[str]:
+    """Полный анализатор: токенизация → (части составных токенов) → удаление стоп-слов → стемминг.
+
+    ``split_compounds`` нужен только поиску (BM25); метрики и генератор работают с целыми токенами:
+
+    * ``"none"`` — составной токен остаётся одним термом: «vpn-шлюз», «help.nimbus.local»;
+    * ``"mixed"`` — для токенов, где латиница смешана с кириллицей, добавляются и части:
+      «vpn-шлюз» → «vpn-шлюз», «vpn», «шлюз». Так вопрос про «VPN-шлюз» находит «шлюз VPN»;
+    * ``"all"`` — части добавляются для любого токена с дефисом или точкой («нимбус.люди», «2.5»).
+
+    Целый токен остаётся всегда, поэтому точный код «vpn-01» по-прежнему совпадает с самим собой.
+    """
+    if split_compounds not in SPLIT_COMPOUNDS_MODES:
+        raise ValueError(
+            f"split_compounds: ожидается одно из {SPLIT_COMPOUNDS_MODES}, получено {split_compounds!r}"
+        )
     tokens = tokenize(text)
+    if split_compounds != "none":
+        tokens = _with_compound_parts(tokens, split_compounds)
     if remove_stopwords:
         tokens = [t for t in tokens if t not in STOPWORDS]
     return [stem(t) for t in tokens]
+
+
+def _with_compound_parts(tokens: list[str], mode: SplitCompounds) -> list[str]:
+    """Добавляет после составного токена его части (по дефисам и точкам)."""
+    result: list[str] = []
+    for token in tokens:
+        result.append(token)
+        if not _COMPOUND_SEP_RE.search(token):
+            continue
+        if mode == "all" or (_CYRILLIC_RE.search(token) and _LATIN_RE.search(token)):
+            result.extend(_COMPOUND_SEP_RE.split(token))
+    return result
 
 
 def word_spans(text: str) -> list[tuple[int, int]]:

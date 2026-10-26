@@ -202,6 +202,42 @@ def test_compound_prepositions_are_stopwords() -> None:
     assert analyze("из-под стола") == [stem("стола")]
 
 
+# ---------------------------------------------------------------- analyze: составные токены
+
+
+def test_analyze_keeps_compounds_whole_by_default() -> None:
+    assert analyze("VPN-шлюза") == [stem("vpn-шлюза")]
+    # Без разбиения «VPN-шлюза» и «шлюз VPN» не имеют ни одного общего терма.
+    assert not set(analyze("VPN-шлюза")) & set(analyze("шлюз VPN"))
+
+
+def test_split_compounds_mixed_matches_reordered_phrase() -> None:
+    query = analyze("VPN-шлюза", split_compounds="mixed")
+    assert query == [stem("vpn-шлюза"), stem("vpn"), stem("шлюза")]  # целый токен остаётся
+    assert {stem("шлюз"), stem("vpn")} <= set(query) & set(analyze("шлюз VPN", split_compounds="mixed"))
+
+
+def test_split_compounds_mixed_leaves_codes_and_hostnames_whole() -> None:
+    # В «mixed» раскладываются только смеси латиницы и кириллицы: коды и адреса — как есть.
+    text = "vpn-01 help.nimbus.local нимбус.люди 2.5"
+    assert analyze(text, split_compounds="mixed") == analyze(text)
+
+
+def test_split_compounds_all_adds_parts_of_any_compound() -> None:
+    assert analyze("нимбус.люди", split_compounds="all") == [
+        stem("нимбус.люди"),
+        stem("нимбус"),
+        stem("люди"),
+    ]
+    # Части проходят через тот же фильтр стоп-слов, что и обычные токены.
+    assert analyze("из-за", split_compounds="all") == []
+
+
+def test_split_compounds_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="split_compounds"):
+        analyze("VPN-шлюз", split_compounds="hyphen")  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------- word_spans
 
 

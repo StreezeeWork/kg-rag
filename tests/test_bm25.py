@@ -276,7 +276,23 @@ def test_duplicate_chunk_ids_rejected() -> None:
         BM25Retriever().index([plain_chunk("a::000", "кот"), plain_chunk("a::000", "пёс")])
 
 
-@pytest.mark.parametrize("params", [{"k1": -0.1}, {"b": 1.5}, {"b": -0.1}])
+@pytest.mark.parametrize("params", [{"k1": -0.1}, {"b": 1.5}, {"b": -0.1}, {"split_compounds": "hyphen"}])
 def test_invalid_parameters_rejected(params: dict) -> None:
     with pytest.raises(ValueError):
         BM25Retriever(**params)
+
+
+def test_split_compounds_lets_bm25_match_reordered_compound() -> None:
+    # Регрессия (вопрос it-031): «VPN-шлюз» был одним термом и не совпадал с «шлюз vpn.nimbus.example».
+    # В режиме "mixed" части составного токена попадают и в индекс, и в запрос.
+    chunks = [
+        plain_chunk("a::000", "Основной шлюз vpn.nimbus.example находится в Москве."),
+        plain_chunk("b::000", "Отпуск составляет 28 календарных дней."),
+    ]
+    whole = BM25Retriever()
+    whole.index(chunks)
+    assert whole.search("VPN-шлюз", k=2) == []
+
+    split = BM25Retriever(split_compounds="mixed")
+    split.index(chunks)
+    assert [r.chunk.chunk_id for r in split.search("VPN-шлюз", k=2)] == ["a::000"]

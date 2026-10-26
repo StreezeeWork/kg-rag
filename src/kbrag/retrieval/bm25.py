@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 import numpy as np
 
 from kbrag.retrieval.base import Retriever
-from kbrag.text import analyze
+from kbrag.text import SPLIT_COMPOUNDS_MODES, SplitCompounds, analyze
 from kbrag.types import Chunk, ScoredChunk
 
 logger = logging.getLogger(__name__)
@@ -36,15 +36,28 @@ class BM25Retriever(Retriever):
 
     name = "bm25"
 
-    def __init__(self, k1: float = 1.5, b: float = 0.75, with_header: bool = True) -> None:
+    def __init__(
+        self,
+        k1: float = 1.5,
+        b: float = 0.75,
+        with_header: bool = True,
+        split_compounds: SplitCompounds = "none",
+    ) -> None:
         super().__init__()
         if k1 < 0:
             raise ValueError(f"k1 должен быть >= 0, получено {k1}")
         if not 0.0 <= b <= 1.0:
             raise ValueError(f"b должен быть в диапазоне [0, 1], получено {b}")
+        if split_compounds not in SPLIT_COMPOUNDS_MODES:
+            raise ValueError(
+                f"split_compounds: ожидается одно из {SPLIT_COMPOUNDS_MODES}, получено {split_compounds!r}"
+            )
         self.k1 = k1
         self.b = b
         self.with_header = with_header
+        # Раскладывать ли составные токены («vpn-шлюз» → + «vpn», «шлюз»), см. text.analyze.
+        # Один и тот же режим обязан действовать и при индексации, и для запроса.
+        self.split_compounds = split_compounds
         self.idf: dict[str, float] = {}
         self.doc_len: np.ndarray = np.zeros(0)
         self.avgdl: float = 0.0
@@ -60,7 +73,7 @@ class BM25Retriever(Retriever):
         postings_raw: dict[str, list[tuple[int, int]]] = defaultdict(list)
         doc_len = np.zeros(n_docs, dtype=np.float64)
         for doc_idx, chunk in enumerate(chunks):
-            terms = analyze(chunk.index_text(self.with_header))
+            terms = analyze(chunk.index_text(self.with_header), split_compounds=self.split_compounds)
             doc_len[doc_idx] = len(terms)
             for term, tf in Counter(terms).items():
                 postings_raw[term].append((doc_idx, tf))
@@ -97,7 +110,7 @@ class BM25Retriever(Retriever):
         """BM25-score запроса для каждого проиндексированного фрагмента (полезно для отладки)."""
         self._require_index()
         scores = np.zeros(len(self.chunks), dtype=np.float64)
-        for term, query_tf in Counter(analyze(query)).items():
+        for term, query_tf in Counter(analyze(query, split_compounds=self.split_compounds)).items():
             posting = self._postings.get(term)
             if posting is None:
                 continue  # терма нет в корпусе — он ничего не добавляет
