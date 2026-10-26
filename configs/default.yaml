@@ -1,0 +1,83 @@
+# Основной конфиг сервиса: гибридный поиск (BM25 + нейросетевые эмбеддинги) и реранкер.
+#
+# Требует нейросетевых зависимостей: `pip install -e .[neural]` (или `make install-neural`).
+# Две модели (около 1 ГБ вместе) скачиваются с Hugging Face при первом запуске в HF_HOME.
+# Нет GPU/интернета или нужен быстрый старт — используйте configs/offline.yaml.
+#
+# Как включить генерацию через LLM (любой OpenAI-совместимый API: vLLM, Ollama, LM Studio, OpenAI):
+#   KBRAG_GENERATION_BACKEND=openai               # вместо extractive
+#   KBRAG_LLM_BASE_URL=http://localhost:8000/v1   # адрес API (в docker compose: http://llm:8000/v1)
+#   KBRAG_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct      # имя модели, как его знает сервер
+#   LLM_API_KEY=...                               # ключ, если сервер его требует (в конфиг ключ не пишем!)
+# Переменные окружения перекрывают значения из этого файла (см. load_config в src/kbrag/config.py).
+
+corpus_dir: data/corpus            # откуда читаем markdown-документы базы знаний
+gold_path: data/eval/gold.jsonl    # эталонные вопросы для оценки (собирает `kbrag build-gold`)
+cache_dir: .cache                  # кэш эмбеддингов пассажей: повторный старт не пересчитывает индекс
+reports_dir: reports               # сюда пишутся отчёты оценки
+
+chunking:
+  strategy: recursive   # режем по заголовкам markdown: фрагмент = смысловой раздел документа
+  chunk_size: 180       # компромисс: e5-small видит до 512 токенов, а короткий фрагмент точнее для поиска
+  chunk_overlap: 30     # используется только стратегией fixed
+  with_header: true     # «Документ / Раздел» в тексте фрагмента помогает и BM25, и эмбеддингам, и реранкеру
+
+retrieval:
+  mode: hybrid          # BM25 — точные термины и коды («size/XL», «Ключ»), эмбеддинги — перефразы
+  top_k: 5              # столько фрагментов после реранкинга уходит в генератор
+  candidates_k: 30      # столько кандидатов достаём до реранкинга: дёшево для поиска, посильно для cross-encoder
+  bm25:
+    k1: 1.5             # насыщение частоты слова
+    b: 0.75             # нормализация на длину фрагмента
+  dense:
+    embedder: sentence-transformers
+    model: intfloat/multilingual-e5-small  # маленькая (118M) многоязычная модель: русский + быстро на CPU
+    query_prefix: null    # null → определить по имени модели: e5 обучена с префиксами "query: "/"passage: "
+    passage_prefix: null
+    batch_size: 32        # сколько текстов кодируем за раз: больше — быстрее, но больше памяти
+    device: auto          # cuda, если доступна, иначе cpu
+  hybrid:
+    fusion: rrf         # слияние по рангам: score BM25 и косинус несопоставимы по шкале
+    rrf_k: 60           # стандартное сглаживание RRF
+    weights:
+      bm25: 0.5
+      dense: 0.5
+
+rerank:
+  enabled: true         # cross-encoder читает пару «вопрос + фрагмент» целиком — точнее, чем bi-encoder
+  model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1  # многоязычный (обучен на mMARCO), лёгкий для CPU
+  batch_size: 16        # пары «вопрос–фрагмент» за один проход модели
+  max_length: 512       # длиннее обрезается: иначе модель падает или работает очень медленно
+  device: auto
+
+generation:
+  backend: extractive   # по умолчанию без LLM; openai — включается переменными окружения (см. шапку файла)
+  base_url: http://localhost:8000/v1   # OpenAI-совместимый API (vLLM из docker compose слушает порт 8000)
+  model: Qwen/Qwen2.5-7B-Instruct      # открытая модель с хорошим русским, помещается в одну GPU 24 ГБ
+  api_key_env: LLM_API_KEY             # ИМЯ переменной окружения с ключом; сам ключ в git не попадает
+  temperature: 0.0      # детерминированные ответы: важно для воспроизводимой оценки
+  max_tokens: 512       # ответ — 1–4 предложения, запас на ссылки и форматирование
+  timeout_s: 60         # не ждём зависший сервер бесконечно
+  max_retries: 3        # повторяем при 429/5xx/таймауте с экспоненциальной паузой
+  max_sentences: 3      # для extractive-генератора: сколько предложений собрать в ответ
+  max_context_chars: 6000  # лимит контекста в промпте: дешевле, быстрее и меньше «потерянных в середине» фактов
+
+abstention:
+  enabled: true         # отказываемся отвечать, если поиск не уверен: выдумка хуже честного «не знаю»
+  threshold: auto       # порог калибруется на dev-выборке командой `kbrag eval --config configs/default.yaml`
+  score_source: auto    # с реранкером уверенность = score cross-encoder (лучше всего отделяет «нет ответа»)
+  calibration_path: reports/calibration.json  # сервис читает порог отсюда, если конфиг поиска не менялся
+
+guardrails:
+  enabled: true         # текст документов — данные, а не инструкции: ловим prompt injection во фрагментах
+  action: drop_line     # убираем только строку с инъекцией, остальной фрагмент полезен
+
+eval:
+  k_values: [1, 3, 5, 10]  # для каких k считаем hit@k / recall@k / nDCG@k
+  report_split: test       # итоговые цифры — только на test-выборке
+  judge:
+    enabled: false         # LLM-судья (faithfulness/correctness 1–5); включайте, когда поднят LLM
+    base_url: http://localhost:8000/v1
+    model: Qwen/Qwen2.5-7B-Instruct
+    api_key_env: LLM_API_KEY
+    timeout_s: 60

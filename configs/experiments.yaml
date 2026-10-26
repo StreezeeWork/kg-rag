@@ -1,0 +1,156 @@
+# Сетка экспериментов: `kbrag grid` (или `make grid`) прогоняет каждый пункт и строит
+# общий leaderboard в reports/grid/leaderboard.md (папку меняет флаг --out).
+#
+# Как это устроено:
+#   * base — конфиг, от которого считаются все эксперименты (путь от корня проекта);
+#   * overrides — ТОЛЬКО отличия от base; они накладываются поверх него так же,
+#     как load_config(base, overrides) из src/kbrag/config.py;
+#   * requires_neural: true — нужен `pip install -e .[neural]`; без него эксперимент
+#     помечается skipped, а не роняет всю сетку;
+#   * heavy: true — большие модели (долго на CPU); запускаются только по явному флагу.
+#
+# Эксперименты выстроены «лесенкой» (абляция): каждый отличается от одного из предыдущих
+# ровно ОДНИМ изменением, поэтому разница в метриках объясняется именно им. Пары для сравнения:
+#   bm25_fixed → bm25_recursive_noheader (нарезка) → bm25_recursive (заголовки);
+#   bm25_recursive → lsa_dense (тип поиска) → hybrid_bm25_lsa (гибрид) → *_weighted (слияние);
+#   lsa_dense → e5_dense и hybrid_bm25_lsa → hybrid_bm25_e5 (модель эмбеддингов);
+#   hybrid_bm25_e5 → *_rerank (реранкер) → *_chunk100 / *_chunk300 (размер фрагмента);
+#   hybrid_bm25_e5_rerank → bge_m3_hybrid_rerank (размер моделей).
+#
+# Два эксперимента совпадают с «боевыми» конфигами по настройкам нарезки и поиска:
+#   hybrid_bm25_lsa       = configs/offline.yaml,
+#   hybrid_bm25_e5_rerank = configs/default.yaml.
+# Так в leaderboard видно, где именно стоит сервис относительно альтернатив.
+# Повторяющиеся настройки выписаны явно, без YAML-якорей: так каждый эксперимент
+# читается сам по себе, без прыжков по файлу.
+
+base: configs/offline.yaml
+
+experiments:
+  # --- Лексический поиск: как нарезка и заголовки влияют на BM25 -------------------
+  - name: bm25_fixed
+    description: "Базовая линия: окна по 180 слов с перекрытием 30 + чистый BM25 без заголовков"
+    requires_neural: false
+    heavy: false
+    overrides:
+      chunking: {strategy: fixed, chunk_size: 180, chunk_overlap: 30, with_header: false}
+      retrieval: {mode: bm25}
+
+  - name: bm25_recursive_noheader
+    description: "Нарезка по структуре markdown лучше окон фиксированного размера"
+    requires_neural: false
+    heavy: false
+    overrides:
+      chunking: {strategy: recursive, chunk_size: 180, with_header: false}
+      retrieval: {mode: bm25}
+
+  - name: bm25_recursive
+    description: "Заголовок документа и раздела в тексте фрагмента помогает BM25 найти нужный раздел"
+    requires_neural: false
+    heavy: false
+    overrides:
+      chunking: {strategy: recursive, chunk_size: 180, with_header: true}
+      retrieval: {mode: bm25}
+
+  # --- Плотный поиск без нейросетей и гибрид -------------------------------------
+  - name: lsa_dense
+    description: "LSA-эмбеддинги ловят перефразы лучше BM25, но проигрывают на точных терминах и кодах"
+    requires_neural: false
+    heavy: false
+    overrides:
+      retrieval: {mode: dense, dense: {embedder: lsa}}
+
+  - name: hybrid_bm25_lsa
+    description: "Гибрид BM25 + LSA со слиянием RRF лучше каждого компонента по отдельности"
+    requires_neural: false
+    heavy: false
+    overrides:
+      retrieval: {mode: hybrid, dense: {embedder: lsa}, hybrid: {fusion: rrf}}
+
+  - name: hybrid_bm25_lsa_weighted
+    description: "Взвешенная сумма нормированных score (0.6 BM25 / 0.4 LSA) не хуже слияния по рангам RRF"
+    requires_neural: false
+    heavy: false
+    overrides:
+      retrieval:
+        mode: hybrid
+        dense: {embedder: lsa}
+        hybrid: {fusion: weighted, weights: {bm25: 0.6, dense: 0.4}}
+
+  # --- Нейросетевые эмбеддинги и реранкер ----------------------------------------
+  - name: e5_dense
+    description: "Многоязычные нейросетевые эмбеддинги e5 заметно лучше LSA на перефразах"
+    requires_neural: true
+    heavy: false
+    overrides:
+      retrieval:
+        mode: dense
+        dense: {embedder: sentence-transformers, model: intfloat/multilingual-e5-small}
+
+  - name: hybrid_bm25_e5
+    description: "BM25 добавляет к e5 точность на ключевых словах и кодах — гибрид лучше e5 в одиночку"
+    requires_neural: true
+    heavy: false
+    overrides:
+      retrieval:
+        mode: hybrid
+        dense: {embedder: sentence-transformers, model: intfloat/multilingual-e5-small}
+        hybrid: {fusion: rrf}
+
+  - name: hybrid_bm25_e5_rerank
+    description: "Cross-encoder поверх 30 гибридных кандидатов поднимает нужный фрагмент в top-1 и улучшает отказы"
+    requires_neural: true
+    heavy: false
+    overrides:
+      retrieval:
+        mode: hybrid
+        top_k: 5
+        candidates_k: 30
+        dense: {embedder: sentence-transformers, model: intfloat/multilingual-e5-small}
+        hybrid: {fusion: rrf}
+      rerank: {enabled: true, model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
+
+  # --- Размер фрагмента при лучшей схеме поиска ----------------------------------
+  - name: hybrid_bm25_e5_rerank_chunk100
+    description: "Мелкие фрагменты (100 слов) точнее для поиска, но могут разрывать факт и его контекст"
+    requires_neural: true
+    heavy: false
+    overrides:
+      chunking: {strategy: recursive, chunk_size: 100, with_header: true}
+      retrieval:
+        mode: hybrid
+        top_k: 5
+        candidates_k: 30
+        dense: {embedder: sentence-transformers, model: intfloat/multilingual-e5-small}
+        hybrid: {fusion: rrf}
+      rerank: {enabled: true, model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
+
+  - name: hybrid_bm25_e5_rerank_chunk300
+    description: "Крупные фрагменты (300 слов) держат контекст целиком, но размывают эмбеддинг и шумят в ответе"
+    requires_neural: true
+    heavy: false
+    overrides:
+      chunking: {strategy: recursive, chunk_size: 300, with_header: true}
+      retrieval:
+        mode: hybrid
+        top_k: 5
+        candidates_k: 30
+        dense: {embedder: sentence-transformers, model: intfloat/multilingual-e5-small}
+        hybrid: {fusion: rrf}
+      rerank: {enabled: true, model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
+
+  # --- Тяжёлые модели: окупается ли размер ---------------------------------------
+  - name: bge_m3_hybrid_rerank
+    description: "Крупные BGE-M3 и bge-reranker-v2-m3 дают прирост качества, оправдывающий их размер и задержку"
+    requires_neural: true
+    heavy: true
+    overrides:
+      retrieval:
+        mode: hybrid
+        top_k: 5
+        candidates_k: 30
+        # У bge-m3 нет префиксов query/passage: null → "" определяется по имени модели автоматически.
+        # batch_size меньше: модель в ~5 раз крупнее e5-small и на CPU упирается в память.
+        dense: {embedder: sentence-transformers, model: BAAI/bge-m3, batch_size: 8}
+        hybrid: {fusion: rrf}
+      rerank: {enabled: true, model: BAAI/bge-reranker-v2-m3, batch_size: 8}
