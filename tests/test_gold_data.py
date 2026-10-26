@@ -19,6 +19,7 @@ import pytest
 
 from kbrag.eval.dataset import GoldItem, assign_splits, load_gold, validate_gold
 from kbrag.eval.metrics import fact_recall
+from kbrag.generation.guardrails import detect_injection
 from kbrag.ingest import load_corpus
 from kbrag.text import analyze, split_sentences
 from kbrag.types import Document
@@ -100,6 +101,27 @@ def test_enough_unanswerable_questions_for_abstention(items: list[GoldItem]) -> 
     assert sum(item.split == "test" for item in unanswerable) >= 35
     questions = [item.question for item in unanswerable]
     assert len(set(questions)) == len(questions), "повторяющиеся неотвечаемые вопросы"
+
+
+def test_dataset_card_table_matches_gold(items: list[GoldItem]) -> None:
+    """Таблица «Состав набора» в DATASET.md — первое, что читает стажёр; она не должна устаревать."""
+    card = (ROOT / "data" / "DATASET.md").read_text(encoding="utf-8")
+    table = dict(re.findall(r"(?m)^\| (\w+) \| (\d+ \| \d+ \| \d+) \|$", card))
+    splits = assign_splits(items)
+    for qtype in {item.qtype for item in items}:
+        dev = sum(item.qtype == qtype and item.split == "dev" for item in splits)
+        test = sum(item.qtype == qtype and item.split == "test" for item in splits)
+        assert table.get(qtype) == f"{dev} | {test} | {dev + test}", f"обновите строку {qtype} в DATASET.md"
+
+
+def test_prompt_injection_trap_is_only_where_documented(docs: dict[str, Document]) -> None:
+    """Строка-инъекция — намеренная ловушка для guardrails (раздел «Намеренные ловушки» в DATASET.md).
+
+    Тест не даёт ей «размножиться» по корпусу незаметно и не даёт карточке набора о ней забыть.
+    """
+    with_injection = sorted(doc_id for doc_id, doc in docs.items() if detect_injection(doc.text))
+    assert with_injection == ["hr-flex-hours"]
+    assert "hr-flex-hours" in (ROOT / "data" / "DATASET.md").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
