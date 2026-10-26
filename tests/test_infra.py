@@ -17,6 +17,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+import yaml
 
 from kbrag.config import load_config
 from kbrag.pipeline import load_calibration
@@ -140,6 +141,54 @@ def test_check_calibration_exit_codes(
 def test_lint_checks_formatting_locally_and_in_ci() -> None:
     assert "ruff format --check" in make_recipe("lint")
     assert "ruff format --check" in (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+
+# --- Docker и секреты: что попадает в git и в образ, кому открыт порт ------------------------------
+
+
+def dockerignore_patterns() -> set[str]:
+    lines = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    return {line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")}
+
+
+def compose_services() -> dict:
+    return yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+
+
+@pytest.mark.parametrize("secret_file", [".env", ".env.local", ".env.prod"])
+def test_env_files_never_reach_git_or_image(secret_file: str) -> None:
+    assert git_ignores(secret_file)
+    patterns = dockerignore_patterns()
+    assert ".env" in patterns and ".env.*" in patterns
+
+
+def test_env_template_stays_in_git() -> None:
+    assert not git_ignores(".env.example")
+
+
+def test_image_gets_corpus_and_calibration_but_not_gold() -> None:
+    patterns = dockerignore_patterns()
+    assert "data/eval" in patterns  # эталон сервису не нужен
+    assert "!reports/calibration*.json" in patterns  # порог отказа сервису нужен
+
+
+def test_ports_are_published_on_localhost_only() -> None:
+    # У /ask нет авторизации: `-p 8080:8080` открыл бы сервис всей сети.
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    published = re.findall(r"docker run[^\n]*?\s-p\s+(\S+)", dockerfile)  # не путать с `mkdir -p`
+    assert published, "в шапке Dockerfile нет примеров docker run"
+    assert all(port.startswith("127.0.0.1:") for port in published), published
+    for name, service in compose_services().items():
+        for port in service.get("ports", []):
+            assert str(port).startswith("127.0.0.1:"), f"{name}: {port}"
+
+
+def test_compose_hardening() -> None:
+    services = compose_services()
+    assert services["app"]["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in services["app"]["security_opt"]
+    assert "ipc" not in services["llm"]  # отдельный /dev/shm (shm_size) вместо общего IPC с хостом
+    assert services["llm"]["shm_size"]
 
 
 # --- scripts/check_part.py: авторские проверки эталона --------------------------------------------

@@ -5,18 +5,20 @@
 # Сборка:
 #   docker build -t kbrag .                                            # ядро: BM25 + LSA, без torch
 #   docker build -t kbrag-neural --build-arg INSTALL_NEURAL=true .     # + sentence-transformers и torch (CPU)
-# Запуск:
-#   docker run --rm -p 8080:8080 kbrag
-#   docker run --rm -p 8080:8080 -e KBRAG_CONFIG=configs/default.yaml kbrag-neural
+# Запуск (127.0.0.1 — порт открыт только для этой машины: у сервиса нет ни авторизации, ни лимита
+# запросов, поэтому наружу его выставляют только за reverse proxy с авторизацией и rate limit):
+#   docker run --rm -p 127.0.0.1:8080:8080 kbrag
+#   docker run --rm -p 127.0.0.1:8080:8080 -v kbrag-cache:/app/.cache \
+#       -e KBRAG_CONFIG=configs/default.yaml kbrag-neural
+# Том kbrag-cache хранит скачанные модели (~1 ГБ): без него они качаются при каждом запуске.
 # Проще всего — через docker compose (см. docker-compose.yml) или `make docker-up`.
+# Нужен BuildKit (по умолчанию в Docker 23+ и Docker Desktop): ниже используется RUN --mount.
 
 FROM python:3.12-slim
 
-# PYTHONDONTWRITEBYTECODE — не создаём .pyc в образе; PYTHONUNBUFFERED — логи сразу видны в `docker logs`;
-# PIP_NO_CACHE_DIR — кэш pip внутри образа бесполезен и только раздувает слой.
+# PYTHONDONTWRITEBYTECODE — не создаём .pyc в образе; PYTHONUNBUFFERED — логи сразу видны в `docker logs`.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
@@ -31,7 +33,10 @@ ARG INSTALL_NEURAL=false
 
 # torch ставим отдельным слоем и ДО копирования кода: он весит сотни мегабайт, а так Docker
 # берёт его из кэша при каждой правке кода. Колёса CPU-only в разы меньше сборки с CUDA.
-RUN if [ "$INSTALL_NEURAL" = "true" ]; then \
+# --mount=type=cache: скачанные колёса pip живут в кэше сборки, а не в слое образа. Образ не толстеет,
+# а после правки кода `pip install .` берёт numpy, scikit-learn и др. из кэша, не скачивая заново.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$INSTALL_NEURAL" = "true" ]; then \
         pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"; \
     fi
 
@@ -39,13 +44,15 @@ RUN if [ "$INSTALL_NEURAL" = "true" ]; then \
 COPY pyproject.toml README.md ./
 COPY src ./src
 # torch уже стоит (если нужен), поэтому pip не будет тянуть тяжёлую CUDA-сборку с PyPI.
-RUN if [ "$INSTALL_NEURAL" = "true" ]; then \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$INSTALL_NEURAL" = "true" ]; then \
         pip install ".[neural]"; \
     else \
         pip install .; \
     fi
 
 # Данные и конфиги — отдельными слоями: правка документа не заставляет переустанавливать пакет.
+# Из data/ в образ попадает только корпус: эталон data/eval сервису не нужен (см. .dockerignore).
 COPY configs ./configs
 COPY data ./data
 # Из reports/ в образ попадают только файлы калибровки порога отказа (см. .dockerignore).

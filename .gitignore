@@ -26,8 +26,11 @@ reports/*
 !reports/.gitkeep
 !reports/calibration*.json
 
-# Секреты и локальные настройки (шаблон — .env.example, он в git)
+# Секреты и локальные настройки: .env и любые варианты (.env.local, .env.prod, …).
+# Шаблон .env.example без секретов — в git.
 .env
+.env.*
+!.env.example
 
 # Редакторы и ОС
 .idea/

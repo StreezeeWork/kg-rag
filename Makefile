@@ -19,9 +19,10 @@ HOST ?= 127.0.0.1
 PORT ?= 8080
 # Индекс колёс torch: CPU-сборка в разы меньше CUDA. Для GPU: TORCH_INDEX=https://download.pytorch.org/whl/cu124
 TORCH_INDEX ?= https://download.pytorch.org/whl/cpu
-# Docker: имя образа, нейросети в образе (true/false), доп. флаги compose (например, --profile llm).
-IMAGE ?= kbrag:latest
+# Docker: нейросети в образе (true/false), имя образа, доп. флаги compose (например, --profile llm).
 INSTALL_NEURAL ?= false
+# Имена как в шапке Dockerfile: kbrag (ядро) и kbrag-neural (с torch) — сборки не затирают друг друга.
+IMAGE ?= $(if $(filter true,$(INSTALL_NEURAL)),kbrag-neural,kbrag):latest
 COMPOSE_ARGS ?=
 
 # `make` без аргументов показывает справку, а не запускает что-то случайное.
