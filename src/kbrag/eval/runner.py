@@ -260,12 +260,17 @@ def aggregate_metrics(rows: Sequence[dict[str, Any]], k_values: Sequence[int]) -
         elif name in abstention:
             result[name] = abstention[name]
         elif name == "latency_p50_ms":
-            result[name] = percentile(latencies, 50)
+            result[name] = _round_ms(percentile(latencies, 50))
         elif name == "latency_p95_ms":
-            result[name] = percentile(latencies, 95)
+            result[name] = _round_ms(percentile(latencies, 95))
         elif name == "n_questions":
             result[name] = len(rows)
     return result
+
+
+def _round_ms(value: float | None) -> float | None:
+    """Как ``latency_ms`` у вопроса — 3 знака: без хвостов float вида 73.54679999999999."""
+    return None if value is None else round(value, 3)
 
 
 def _split_metrics(

@@ -35,6 +35,9 @@ GENERATION_METRICS = (
 )
 ABSTENTION_METRICS = ("abstain_precision", "abstain_recall", "abstain_f1", "false_abstention_rate")
 LATENCY_METRICS = ("latency_p50_ms", "latency_p95_ms")
+# Поля-замеры времени (в метриках, per_question и index_stats). Только они меняются от
+# прогона к прогону с тем же конфигом: всё остальное в отчёте детерминировано.
+TIMING_KEYS = frozenset({*LATENCY_METRICS, "latency_ms", "index_time_ms"})
 
 # Поля строки per_question (помимо метрик вопроса под теми же именами, что и в metrics).
 PER_QUESTION_FIELDS = (

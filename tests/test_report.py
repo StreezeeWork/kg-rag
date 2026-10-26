@@ -269,7 +269,9 @@ def test_leaderboard_escapes_pipe_in_names() -> None:
     assert "| a\\|b |" in text
 
 
-def test_report_is_byte_for_byte_reproducible(tmp_path: Path, results: list[ExperimentResult]) -> None:
+def test_report_serialization_is_deterministic(tmp_path: Path, results: list[ExperimentResult]) -> None:
+    # Один и тот же результат → те же байты. Воспроизводимость двух прогонов проверяет
+    # test_runner.py::test_two_runs_differ_only_in_timings.
     write_report(results, tmp_path / "first")
     write_report(results, tmp_path / "second")
     for relative in ("results.json", "leaderboard.md", "per_question/bm25.jsonl"):

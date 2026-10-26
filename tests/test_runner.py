@@ -20,6 +20,7 @@ from kbrag.eval.report import write_report
 from kbrag.eval.results import (
     GENERATION_METRICS,
     PER_QUESTION_FIELDS,
+    TIMING_KEYS,
     ExperimentResult,
     metric_names,
     retrieval_metric_names,
@@ -188,8 +189,37 @@ def test_latency_percentiles_match_per_question(gold: list[GoldItem], mini_docs:
     latencies = [row["latency_ms"] for row in result.per_question]
 
     assert all(value >= 0 for value in latencies)
-    assert result.metrics["all"]["latency_p50_ms"] == pytest.approx(percentile(latencies, 50))
-    assert result.metrics["all"]["latency_p95_ms"] == pytest.approx(percentile(latencies, 95))
+    assert result.metrics["all"]["latency_p50_ms"] == round(percentile(latencies, 50), 3)
+    assert result.metrics["all"]["latency_p95_ms"] == round(percentile(latencies, 95), 3)
+
+
+def test_latency_percentiles_are_rounded_like_per_question(
+    gold: list[GoldItem], mini_docs: list[Document]
+) -> None:
+    # Регрессия: перцентили писались как 73.54679999999999 — ложная точность и шумный дифф.
+    result = run_experiment(make_cfg(), gold=gold, docs=mini_docs)
+    for split in ("dev", "test", "all"):
+        for name in ("latency_p50_ms", "latency_p95_ms"):
+            value = result.metrics[split][name]
+            assert value == round(value, 3)
+
+
+def _without_timings(obj):
+    """Копия результата без замеров времени (TIMING_KEYS) — они единственные недетерминированы."""
+    if isinstance(obj, dict):
+        return {key: _without_timings(value) for key, value in obj.items() if key not in TIMING_KEYS}
+    if isinstance(obj, list):
+        return [_without_timings(value) for value in obj]
+    return obj
+
+
+def test_two_runs_differ_only_in_timings(gold: list[GoldItem], mini_docs: list[Document]) -> None:
+    # Честная проверка воспроизводимости: два независимых прогона, а не две записи одного объекта.
+    cfg = make_cfg(retrieval={"mode": "hybrid"}, abstention={"threshold": 0.3})
+    first = run_experiment(cfg, name="repro", gold=gold, docs=mini_docs).to_dict()
+    second = run_experiment(cfg, name="repro", gold=gold, docs=mini_docs).to_dict()
+
+    assert _without_timings(first) == _without_timings(second)
 
 
 def test_by_type_is_built_for_report_split(gold: list[GoldItem], mini_docs: list[Document]) -> None:
