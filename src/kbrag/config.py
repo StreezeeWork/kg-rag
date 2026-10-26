@@ -15,12 +15,19 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class _Strict(BaseModel):
     # Опечатка в имени параметра в YAML должна падать с ошибкой, а не молча игнорироваться.
     model_config = ConfigDict(extra="forbid")
+
+
+def _check_http_url(value: str) -> str:
+    """``base_url`` без схемы («localhost:8000/v1») httpx не поймёт — падаем при чтении конфига, а не на первом /ask."""
+    if not value.strip().lower().startswith(("http://", "https://")):
+        raise ValueError(f"base_url должен начинаться с http:// или https://, получено {value!r}")
+    return value
 
 
 class ChunkingConfig(_Strict):
@@ -80,10 +87,15 @@ class GenerationConfig(_Strict):
     api_key_env: str = "LLM_API_KEY"  # имя переменной окружения, сам ключ в конфиг не пишем
     temperature: float = 0.0
     max_tokens: int = 512
-    timeout_s: float = 60.0
+    timeout_s: float = 60.0  # общий лимит на один ответ LLM вместе с повторами и паузами между ними
     max_retries: int = 3
     max_sentences: int = 3  # для extractive-генератора
     max_context_chars: int = 6000
+
+    @field_validator("base_url")
+    @classmethod
+    def _check_base_url(cls, value: str) -> str:
+        return _check_http_url(value)
 
 
 class AbstentionConfig(_Strict):
@@ -106,7 +118,12 @@ class JudgeConfig(_Strict):
     base_url: str = "http://localhost:8000/v1"
     model: str = "Qwen/Qwen2.5-7B-Instruct"
     api_key_env: str = "LLM_API_KEY"
-    timeout_s: float = 60.0
+    timeout_s: float = 60.0  # общий лимит на одну оценку вместе с повторами
+
+    @field_validator("base_url")
+    @classmethod
+    def _check_base_url(cls, value: str) -> str:
+        return _check_http_url(value)
 
 
 class EvalConfig(_Strict):

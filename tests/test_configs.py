@@ -92,3 +92,20 @@ def test_calibration_hint_in_config_mentions_save_flag(name: str) -> None:
     ]
     assert hints, "в конфиге должна быть подсказка, как откалибровать порог для сервиса"
     assert all("--save-calibration" in line for line in hints)
+
+
+@pytest.mark.parametrize("section", ["generation", "judge"])
+@pytest.mark.parametrize("url", ["localhost:8000/v1", "ftp://llm.test/v1", ""])
+def test_llm_base_url_without_http_scheme_fails_when_config_is_read(section: str, url: str) -> None:
+    # Ошибка в адресе LLM видна при загрузке конфига, а не при первом вопросе к сервису.
+    data = {"generation": {"base_url": url}} if section == "generation" else {"eval": {"judge": {"base_url": url}}}
+    with pytest.raises(ValueError, match="http:// или https://"):
+        AppConfig.model_validate(data)
+
+
+def test_llm_base_url_from_environment_is_validated_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KBRAG_LLM_BASE_URL", "llm:8000/v1")
+    with pytest.raises(ValueError, match="KBRAG|base_url"):
+        load_config(CONFIGS / "offline.yaml")
+    monkeypatch.setenv("KBRAG_LLM_BASE_URL", "https://llm.example/v1")
+    assert load_config(CONFIGS / "offline.yaml").generation.base_url == "https://llm.example/v1"
