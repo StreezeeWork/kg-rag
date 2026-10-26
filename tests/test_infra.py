@@ -221,6 +221,19 @@ def test_ports_are_published_on_localhost_only() -> None:
             assert str(port).startswith("127.0.0.1:"), f"{name}: {port}"
 
 
+def ci_jobs() -> dict:
+    return yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+
+
+def test_ci_builds_docker_image_and_runs_on_windows() -> None:
+    # Без сборки образа в CI отсутствующий README.md (COPY в Dockerfile) никто бы не заметил.
+    jobs = ci_jobs()
+    docker_steps = " ".join(step.get("run", "") for step in jobs["docker"]["steps"])
+    assert "docker build" in docker_steps
+    assert "/health" in docker_steps
+    assert jobs["test-windows"]["runs-on"].startswith("windows")
+
+
 def test_compose_hardening() -> None:
     services = compose_services()
     assert services["app"]["cap_drop"] == ["ALL"]

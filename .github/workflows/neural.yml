@@ -1,0 +1,68 @@
+# Нейросетевой прогон: «боевой» конфиг configs/default.yaml (BM25 + e5 + реранкер) и тесты с маркером neural.
+#
+# В основном CI (ci.yml) его нет: модели весят ~1 ГБ, а оценка с реранкером на CPU идёт десятки минут.
+# Поэтому запускаем вручную (Actions → Neural → Run workflow) и раз в неделю по расписанию:
+# версии torch / sentence-transformers в pyproject.toml не закреплены, и еженедельный прогон
+# показывает, не «поплыли» ли нейросетевые метрики на свежих библиотеках.
+
+name: Neural
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1" # понедельник, 03:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  neural:
+    name: neural (default.yaml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # Модели кладём внутрь рабочей папки, чтобы их сохранял actions/cache (.cache/ в .gitignore).
+      HF_HOME: ${{ github.workspace }}/.cache/huggingface
+      KBRAG_RUN_NEURAL: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Cache Hugging Face models
+        # Ключ — конфиги с именами моделей: сменили модель → кэш скачается заново.
+        uses: actions/cache@v4
+        with:
+          path: .cache/huggingface
+          key: hf-models-${{ hashFiles('configs/default.yaml', 'configs/experiments.yaml') }}
+
+      - name: Install package (CPU torch + neural + dev)
+        # Сначала torch из CPU-индекса, иначе pip скачает сборку с CUDA на несколько ГБ.
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.6"
+          pip install -e ".[dev,neural]"
+
+      - name: Neural tests
+        run: pytest -m neural
+
+      - name: Evaluate default config (quality gate)
+        # Тот же конфиг поиска, что hybrid_bm25_e5_rerank в сетке: recall@5 ≈ 0.93 на test
+        # (reports/grid_baseline). Порог — минус запас ~0.05, округлённый вниз до 0.05 → 0.85.
+        run: kbrag eval --config configs/default.yaml --name neural_ci --fail-under recall@5=0.85
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-neural
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14

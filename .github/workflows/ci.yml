@@ -68,14 +68,19 @@ jobs:
 
       - name: Offline evaluation (quality gate)
         # Код возврата 2, если метрика ниже порога: регрессия качества ломает CI, как и упавший тест.
-        # Порог: офлайн-конфиг даёт recall@5 = 0.863 на test; минус запас ~0.05 и округление
-        # вниз до 0.05 → 0.80. Оценка детерминирована, так что запас ловит именно регрессии
-        # (правки нарезки, поиска или эталона), а не шум. Улучшили поиск — поднимите порог.
+        # Порог = значение офлайн-конфига на test минус запас ~0.05, округлённое вниз до 0.05.
+        # Оценка детерминирована, так что запас ловит именно регрессии, а не шум:
+        #   recall@5           ≈ 0.85 → 0.80  (поиск: нарезка, BM25, LSA, эталон);
+        #   fact_recall        ≈ 0.63 → 0.55  (ответ содержит ключевые факты);
+        #   citation_precision ≈ 0.45–0.59 → 0.40  (ссылки [n] ведут на нужные фрагменты; от меньшего значения).
+        # abstain_f1 (≈ 0.32) пока не проверяем: метрика низкая, запаса «минус 0.05» почти нет.
+        # Улучшили качество — поднимите порог (значения — в reports/ci/leaderboard.md артефакта).
         # --save-calibration перезаписывает reports/calibration_offline.json свежим порогом;
         # закоммиченную версию сначала откладываем, чтобы сравнить на следующем шаге.
         run: |
           cp reports/calibration_offline.json "$RUNNER_TEMP/calibration_committed.json"
-          kbrag eval --config configs/offline.yaml --name ci --fail-under recall@5=0.80 --save-calibration
+          kbrag eval --config configs/offline.yaml --name ci --save-calibration \
+            --fail-under recall@5=0.80 fact_recall=0.55 citation_precision=0.40
 
       - name: Check abstention calibration is up to date
         # Порог отказа лежит в git (его читает сервис). Если правка корпуса или эталона сдвинула
@@ -91,3 +96,67 @@ jobs:
           path: reports/
           if-no-files-found: ignore
           retention-days: 14
+
+  test-windows:
+    # Проект разрабатывают на Windows. Главное отличие от Linux — кодировка: когда вывод CLI идёт
+    # в файл или pipe, Python берёт кодировку системы (cp1252), и кириллица может уронить команду.
+    # Одной версии Python достаточно: остальное проверяет job test.
+    name: test (windows, python 3.12)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package (core + dev)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Unit tests
+        run: pytest
+
+      - name: CLI with output redirected to files
+        # Вывод в файл — как в скриптах и пайплайнах. В интерактивной консоли Windows Python пишет
+        # через UTF-16, поэтому у разработчика ошибка кодировки не видна, а здесь — видна.
+        shell: bash
+        run: |
+          kbrag validate-data > validate.txt
+          kbrag ask "VPN" > ask.txt
+          cat validate.txt ask.txt
+
+  docker:
+    # Образ собирается только из того, что лежит в git, — так ловим COPY несуществующего файла
+    # (например, README.md), сломанный Dockerfile и сервис, который не стартует в контейнере.
+    # Ядро без torch: нейросетевой образ собирается так же, но качает ~1 ГБ колёс.
+    name: docker (core image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --build-arg INSTALL_NEURAL=false -t kbrag:ci .
+
+      - name: Smoke test (GET /health, POST /ask)
+        # /health отвечает, когда индекс построен. abstention_threshold не null — значит, калибровка
+        # порога из git попала в образ и сервис умеет отвечать «нет ответа».
+        run: |
+          docker run -d --name kbrag -p 127.0.0.1:8080:8080 kbrag:ci
+          curl -fsS --retry 30 --retry-delay 2 --retry-all-errors http://127.0.0.1:8080/health > health.json
+          cat health.json
+          python3 -c "import json; h = json.load(open('health.json')); assert h['abstention_threshold'] is not None, h"
+          curl -fsS -X POST http://127.0.0.1:8080/ask -H "Content-Type: application/json" \
+            -d '{"question": "Сколько дней длится ежегодный отпуск?"}'
+
+      - name: Container logs
+        if: always()
+        run: docker logs kbrag || true
