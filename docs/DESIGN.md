@@ -216,10 +216,12 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
 - `Citation.index` — номер `[n]` в списке, который видел генератор (после `sanitize_contexts`).
   При `drop_chunk` (или `drop_line`, если фрагмент целиком был инъекцией) он может не совпасть с позицией
   в `Answer.contexts`. Надёжная связь — `Citation.chunk_id`: по нему сверяют CLI и веб-страница.
-- `save_calibration(cfg, threshold, path=None, experiment=None) -> Path` (в `kbrag.pipeline`) — единственное
-  место, задающее формат файла калибровки: `{"fingerprint", "score_source", "threshold"}` и, если передан
-  `experiment`, ещё `"experiment"`, `"created_at"`. `load_calibration` отвергает файл с другим
-  `fingerprint` **или** другим `score_source`. Пишет файл только `kbrag eval --save-calibration`;
+- `save_calibration(cfg, threshold, path=None, experiment=None, corpus_sha256=None) -> Path` (в `kbrag.pipeline`) —
+  единственное место, задающее формат файла калибровки: `{"fingerprint", "score_source", "threshold"}`, если передан
+  `corpus_sha256` — ещё он (`ingest.corpus_fingerprint`, та же схема, что `provenance.corpus_sha256`), если передан
+  `experiment` — ещё `"experiment"`, `"created_at"`. `load_calibration(cfg, corpus_sha256=None)` отвергает файл с другим
+  `fingerprint`, другим `score_source` **или** другим `corpus_sha256` (если он есть и в файле, и в вызове;
+  `from_config` передаёт отпечаток проиндексированного корпуса). Пишет файл только `kbrag eval --save-calibration`;
   `kbrag grid` калибровку не сохраняет (иначе последний эксперимент затёр бы порог сервиса).
 - `ExtractiveGenerator`: пункт списка выводится и оценивается вместе с контекстом — вводной фразой на «:»
   перед списком или заголовком раздела (последняя строка `#` во фрагменте, иначе `Chunk.section`, без
@@ -314,8 +316,8 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
 - Файлы калибровки `reports/calibration*.json` лежат в git (исключение из игнорируемого `reports/*`):
   свежий клон, `make serve` и Docker-образ сразу умеют отказываться по порогу. `make eval` вызывает
   `kbrag eval --save-calibration`. CI пересчитывает офлайн-порог и сверяет его с закоммиченным
-  (`scripts/check_calibration.py`: `fingerprint` и `score_source` — точно, `threshold` — с допуском 1e-3):
-  отпечаток не покрывает корпус и эталон. Поменяли поиск, корпус или эталон — `make eval` и коммит файла.
+  (`scripts/check_calibration.py`: `fingerprint`, `score_source`, `corpus_sha256` — точно, `threshold` — с допуском
+  1e-3): эталон отпечатки не покрывают. Поменяли поиск, корпус или эталон — `make eval` и коммит файла.
 - Образ сервиса не содержит `data/eval` (эталон нужен только `kbrag eval`).
 - Тесты: autouse-фикстура в `tests/conftest.py` убирает из окружения все `KBRAG_*`, кроме `KBRAG_RUN_NEURAL`;
   общие фабрики фрагментов — фикстуры `make_context(doc_id, needle, …)` и `make_text_chunk(text, chunk_id)`.

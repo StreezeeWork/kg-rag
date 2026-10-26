@@ -20,6 +20,8 @@ Front matter — «паспорт» документа (YAML между стро
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import logging
 import re
 from pathlib import Path
@@ -123,6 +125,19 @@ def load_corpus(corpus_dir: str | Path) -> list[Document]:
         logger.warning("В каталоге %s не найдено ни одного документа", corpus_dir)
     logger.info("Загружено документов: %d (из %s)", len(docs), corpus_dir)
     return sorted(docs, key=lambda doc: doc.doc_id)
+
+
+def corpus_fingerprint(docs: list[Document]) -> str:
+    """Короткий sha256 содержимого корпуса: id, заголовок, текст и шапка каждого документа.
+
+    Не зависит от порядка чтения файлов и от путей. Им помечают всё, что посчитано на корпусе:
+    отчёт оценки (``provenance.corpus_sha256``) и файл калибровки порога отказа (порог,
+    подобранный на одном корпусе, к другому не применяется).
+    """
+    rows = [[doc.doc_id, doc.title, doc.text, doc.metadata] for doc in sorted(docs, key=lambda d: d.doc_id)]
+    # sort_keys — порядок ключей шапки не меняет хэш; default=str — для дат из шапок.
+    payload = json.dumps(rows, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _to_plain(value: Any) -> Any:

@@ -36,7 +36,7 @@ from kbrag.generation import (
     sanitize_contexts,
     select_within_budget,
 )
-from kbrag.ingest import chunk_corpus, load_corpus, make_chunker
+from kbrag.ingest import chunk_corpus, corpus_fingerprint, load_corpus, make_chunker
 from kbrag.retrieval import Reranker, Retriever, build_retriever, make_reranker
 from kbrag.types import Answer, Chunk, Document, ScoredChunk
 
@@ -86,16 +86,19 @@ def save_calibration(
     threshold: float | None,
     path: str | Path | None = None,
     experiment: str | None = None,
+    corpus_sha256: str | None = None,
 ) -> Path:
     """Сохраняет подобранный на dev порог для сервиса (по умолчанию в ``abstention.calibration_path``).
 
     Формат файла (единственное место, где он задаётся; ``kbrag eval --save-calibration`` зовёт эту функцию)::
 
         {"fingerprint": "3f2a9c…", "score_source": "dense", "threshold": 0.41,
-         "experiment": "offline_baseline", "created_at": "2025-06-01T12:00:00+00:00"}
+         "corpus_sha256": "9b1e…", "experiment": "offline_baseline",
+         "created_at": "2025-06-01T12:00:00+00:00"}
 
-    ``fingerprint`` и ``score_source`` нужны при чтении: они защищают от применения
-    порога к поиску, для которого он не подбирался. ``experiment`` и ``created_at`` пишутся,
+    ``fingerprint``, ``score_source`` и ``corpus_sha256`` нужны при чтении: они защищают от
+    применения порога к поиску или корпусу, для которых он не подбирался (``corpus_sha256`` —
+    ``ingest.corpus_fingerprint``, пишется, если передан). ``experiment`` и ``created_at`` пишутся,
     только если передан ``experiment``, — это подсказка человеку, откуда взялся порог;
     сервис эти поля не читает.
     """
@@ -107,17 +110,25 @@ def save_calibration(
         "score_source": resolve_score_source(cfg, has_reranker=cfg.rerank.enabled),
         "threshold": threshold,
     }
+    if corpus_sha256 is not None:
+        payload["corpus_sha256"] = corpus_sha256
     if experiment is not None:
         payload["experiment"] = experiment
         payload["created_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    target.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
     logger.info("Порог отказа %s сохранён в %s", threshold, target)
     return target
 
 
-def load_calibration(cfg: AppConfig) -> float | None:
-    """Читает порог из файла калибровки; None, если файла нет или он от другого поиска.
+def load_calibration(cfg: AppConfig, corpus_sha256: str | None = None) -> float | None:
+    """Читает порог из файла калибровки; None, если файла нет или он от другого поиска или корпуса.
+
+    ``corpus_sha256`` — отпечаток корпуса, который сейчас проиндексирован (``ingest.corpus_fingerprint``).
+    Если он передан, а в файле записан другой, порог не применяется: правка документов меняет
+    распределение уверенности, и порог, подобранный на старом корпусе, уже не тот.
 
     Отсутствие порога — не ошибка: сервис просто не отказывается по уверенности
     (генератор всё равно может ответить «В базе знаний нет ответа…»). Поэтому здесь
@@ -146,7 +157,7 @@ def load_calibration(cfg: AppConfig) -> float | None:
     if data.get("fingerprint") != expected:
         logger.warning(
             "Файл калибровки %s посчитан для других настроек поиска (fingerprint %s, нужен %s): "
-            "порог не применяется — перезапустите kbrag eval",
+            "порог не применяется — перезапустите kbrag eval --config <конфиг> --save-calibration",
             path,
             data.get("fingerprint"),
             expected,
@@ -163,6 +174,17 @@ def load_calibration(cfg: AppConfig) -> float | None:
         )
         return None
 
+    saved_corpus = data.get("corpus_sha256")
+    if corpus_sha256 is not None and saved_corpus is not None and saved_corpus != corpus_sha256:
+        logger.warning(
+            "Порог в %s подобран на другом корпусе (corpus_sha256 %s, сейчас %s): порог не применяется — "
+            "перезапустите kbrag eval --config <конфиг> --save-calibration",
+            path,
+            saved_corpus,
+            corpus_sha256,
+        )
+        return None
+
     threshold = data.get("threshold")
     if threshold is None:
         return None
@@ -173,11 +195,11 @@ def load_calibration(cfg: AppConfig) -> float | None:
     return float(threshold)
 
 
-def resolve_threshold(cfg: AppConfig) -> float | None:
+def resolve_threshold(cfg: AppConfig, corpus_sha256: str | None = None) -> float | None:
     """Порог для сервиса: число из конфига как есть, ``"auto"`` — из файла калибровки, null — без порога."""
     value = cfg.abstention.threshold
     if value == "auto":
-        return load_calibration(cfg)
+        return load_calibration(cfg, corpus_sha256=corpus_sha256)
     return None if value is None else float(value)
 
 
@@ -247,7 +269,7 @@ class RAGPipeline:
             generator=make_generator(cfg.generation),
             # Реранкер должен видеть тот же текст фрагмента, что и индекс (с заголовком или без).
             reranker=make_reranker(cfg.rerank, with_header=cfg.chunking.with_header),
-            threshold=resolve_threshold(cfg),
+            threshold=resolve_threshold(cfg, corpus_sha256=corpus_fingerprint(list(docs))),
             docs=list(docs),
             chunks=chunks,
         )

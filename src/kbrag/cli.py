@@ -398,7 +398,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 "не лучше случайного) — файл калибровки не изменён"
             )
             return EXIT_ERROR
-        path = _save_calibration(cfg, result.name, result.threshold)
+        path = _save_calibration(cfg, result.name, result.threshold, result.provenance.get("corpus_sha256"))
         print(f"Порог отказа сохранён: {path}")
     return code
 
@@ -428,16 +428,19 @@ def _calibration_not_saveable(cfg: AppConfig) -> str | None:
     return None
 
 
-def _save_calibration(cfg: AppConfig, experiment: str, threshold: float) -> Path:
+def _save_calibration(
+    cfg: AppConfig, experiment: str, threshold: float, corpus_sha256: str | None = None
+) -> Path:
     """Пишет порог для сервиса в ``abstention.calibration_path``.
 
     Формат файла задаёт ``pipeline.save_calibration`` — тот же модуль, что его читает
     (``pipeline.load_calibration``), поэтому писатель и читатель не разойдутся.
-    ``experiment`` попадает в файл как подсказка человеку: откуда и когда взялся порог.
+    ``experiment`` попадает в файл как подсказка человеку: откуда и когда взялся порог;
+    ``corpus_sha256`` — на каком корпусе он подобран (сервис сверяет его с проиндексированным).
     """
     from kbrag.pipeline import save_calibration
 
-    return save_calibration(cfg, threshold, experiment=experiment)
+    return save_calibration(cfg, threshold, experiment=experiment, corpus_sha256=corpus_sha256)
 
 
 def _check_quality_gates(result: ExperimentResult, gates: Sequence[tuple[str, float]]) -> int:

@@ -23,6 +23,7 @@ import yaml
 from packaging.requirements import Requirement
 
 from kbrag.config import load_config
+from kbrag.ingest import corpus_fingerprint, load_corpus
 from kbrag.pipeline import load_calibration
 from kbrag.types import Document, ScoredChunk
 
@@ -84,9 +85,11 @@ def test_committed_calibration_matches_offline_config(monkeypatch: pytest.Monkey
     assert cfg.abstention.threshold == "auto"
     assert cfg.abstention.calibration_path == OFFLINE_CALIBRATION
 
-    threshold = load_calibration(cfg)
+    threshold = load_calibration(cfg, corpus_sha256=corpus_fingerprint(load_corpus(cfg.corpus_dir)))
 
-    assert threshold is not None, "порог не загрузился: файла нет или он посчитан для другого поиска"
+    assert threshold is not None, (
+        "порог не загрузился: файла нет или он посчитан для другого поиска или корпуса"
+    )
     assert 0.0 < threshold < 1.0  # офлайн-уверенность — косинус LSA
 
 

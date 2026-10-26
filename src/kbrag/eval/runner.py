@@ -68,7 +68,7 @@ from kbrag.eval.results import (
     retrieval_metric_names,
 )
 from kbrag.generation import ABSTAIN_TEXT
-from kbrag.ingest import load_corpus
+from kbrag.ingest import corpus_fingerprint, load_corpus
 from kbrag.pipeline import LOW_CONFIDENCE_FLAG, RAGPipeline
 from kbrag.retrieval import neural_available
 from kbrag.types import Answer, Citation, Document, ScoredChunk
@@ -161,9 +161,8 @@ def data_fingerprint(docs: Sequence[Document], gold: Sequence[GoldItem]) -> dict
     правка одного документа или другая ``KBRAG_CORPUS_DIR`` меняют метрики при том же конфиге.
     По хэшам сразу видно, сравнимы ли два отчёта. Хэш не зависит от порядка чтения файлов.
     """
-    corpus = [[doc.doc_id, doc.title, doc.text, doc.metadata] for doc in sorted(docs, key=lambda d: d.doc_id)]
     return {
-        "corpus_sha256": _short_sha256(corpus),
+        "corpus_sha256": corpus_fingerprint(list(docs)),
         "gold_sha256": _short_sha256([asdict(item) for item in gold]),
         "n_docs": len(docs),
         "n_gold": len(gold),

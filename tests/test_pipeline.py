@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -17,7 +18,7 @@ import pytest
 
 from kbrag.config import AppConfig, deep_merge
 from kbrag.generation import ABSTAIN_TEXT, ExtractiveGenerator, GenerationResult, Generator, detect_injection
-from kbrag.ingest import chunk_corpus, make_chunker
+from kbrag.ingest import chunk_corpus, corpus_fingerprint, make_chunker
 from kbrag.pipeline import (
     CONTEXT_TRUNCATED_FLAG,
     LOW_CONFIDENCE_FLAG,
@@ -595,6 +596,24 @@ def test_auto_threshold_ignored_when_score_source_differs(tmp_path: Path) -> Non
     )
     assert calibration_fingerprint(bm25_source) == calibration_fingerprint(cfg)
     assert load_calibration(bm25_source) is None
+
+
+def test_auto_threshold_ignored_after_corpus_edit(
+    tmp_path: Path, mini_docs: list[Document], caplog: pytest.LogCaptureFixture
+) -> None:
+    # Те же настройки поиска, но документы поменялись: порог с dev старого корпуса не применяем.
+    cfg = make_cfg(tmp_path, abstention={"threshold": "auto"})
+    save_calibration(cfg, 0.4, corpus_sha256=corpus_fingerprint(mini_docs))
+    assert RAGPipeline.from_config(cfg, docs=mini_docs).threshold == 0.4
+
+    edited = [dataclasses.replace(mini_docs[0], text=mini_docs[0].text + "\n\nНовый абзац."), *mini_docs[1:]]
+    with caplog.at_level(logging.WARNING, logger="kbrag.pipeline"):
+        assert RAGPipeline.from_config(cfg, docs=edited).threshold is None
+    assert "другом корпусе" in caplog.text
+
+    # Старый файл без corpus_sha256 по-прежнему читается (сверять не с чем).
+    save_calibration(cfg, 0.4)
+    assert RAGPipeline.from_config(cfg, docs=edited).threshold == 0.4
 
 
 def test_numeric_and_null_thresholds_from_config(tmp_path: Path, mini_docs: list[Document]) -> None:

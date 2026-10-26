@@ -7,13 +7,14 @@
 """
 
 from kbrag.ingest.chunking import Chunker, FixedSizeChunker, RecursiveChunker, chunk_corpus, make_chunker
-from kbrag.ingest.loader import load_corpus, load_document, parse_front_matter
+from kbrag.ingest.loader import corpus_fingerprint, load_corpus, load_document, parse_front_matter
 
 __all__ = [
     "Chunker",
     "FixedSizeChunker",
     "RecursiveChunker",
     "chunk_corpus",
+    "corpus_fingerprint",
     "load_corpus",
     "load_document",
     "make_chunker",

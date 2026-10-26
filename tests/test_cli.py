@@ -22,6 +22,7 @@ from kbrag.api.app import AskResponse
 from kbrag.cli import EXIT_ERROR, EXIT_OK, EXIT_QUALITY_GATE, main
 from kbrag.config import deep_merge, load_config
 from kbrag.eval.dataset import assign_splits, item_from_record, load_gold
+from kbrag.ingest import corpus_fingerprint, load_corpus
 from kbrag.pipeline import calibration_fingerprint, load_calibration
 
 VACATION_Q = "Сколько календарных дней длится ежегодный отпуск?"
@@ -401,7 +402,15 @@ def test_eval_save_calibration_writes_file_the_service_can_read(
 
     cfg = load_config(config_path)
     data = json.loads(Path(cfg.abstention.calibration_path).read_text(encoding="utf-8"))
-    assert set(data) == {"threshold", "fingerprint", "score_source", "experiment", "created_at"}
+    assert set(data) == {
+        "threshold",
+        "fingerprint",
+        "score_source",
+        "corpus_sha256",
+        "experiment",
+        "created_at",
+    }
+    assert data["corpus_sha256"] == corpus_fingerprint(load_corpus(cfg.corpus_dir))
     assert isinstance(data["threshold"], float)
     assert data["fingerprint"] == calibration_fingerprint(cfg)
     assert data["score_source"] == "bm25"
