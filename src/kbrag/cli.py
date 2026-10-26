@@ -64,22 +64,31 @@ DEFAULT_GRID_OUT = "reports/grid"
 
 # Сплит, по которому проверяется --fail-under: итоговое качество меряем только на test.
 GATE_SPLIT = "test"
-# Метрики, которые печатает `kbrag eval` (те же столбцы, что в leaderboard.md).
+# Метрики, которые печатает `kbrag eval` (те же столбцы, что в двух таблицах leaderboard.md).
 SUMMARY_METRICS = (
     "recall@5",
     "mrr",
     "ndcg@5",
     "hit@1",
+    "fact_recall_answered",
     "fact_recall",
     "citation_precision",
+    "stale_citation_rate",
     "abstain_f1",
+    "false_abstention_rate",
     "latency_p50_ms",
     "latency_p95_ms",
 )
 # Для этих метрик «меньше — лучше», и порог «не ниже» для них бессмыслен: --fail-under
 # latency_p95_ms=500 читался бы как «упасть, если быстрее 500 мс». Отклоняем явно.
 LOWER_IS_BETTER = frozenset(
-    {"latency_p50_ms", "latency_p95_ms", "false_abstention_rate", "invalid_citation_rate"}
+    {
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "false_abstention_rate",
+        "invalid_citation_rate",
+        "stale_citation_rate",
+    }
 )
 
 

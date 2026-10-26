@@ -370,7 +370,11 @@ def test_eval_quality_gate(tmp_path: Path, cli_config: Path, capsys: pytest.Capt
 
 @pytest.mark.parametrize(
     ("gate", "message"),
-    [("recall@50=0.5", "неизвестные метрики"), ("latency_p95_ms=500", "меньше — лучше")],
+    [
+        ("recall@50=0.5", "неизвестные метрики"),
+        ("latency_p95_ms=500", "меньше — лучше"),
+        ("stale_citation_rate=0.1", "меньше — лучше"),
+    ],
 )
 def test_eval_rejects_bad_gate_metric_before_running(
     tmp_path: Path, cli_config: Path, capsys: pytest.CaptureFixture[str], gate: str, message: str
