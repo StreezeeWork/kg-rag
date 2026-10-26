@@ -34,7 +34,9 @@ class ChunkingConfig(_Strict):
     strategy: Literal["fixed", "recursive"] = "recursive"
     chunk_size: int = Field(180, gt=10, description="Максимальный размер фрагмента в словах")
     chunk_overlap: int = Field(30, ge=0, description="Перекрытие соседних фрагментов в словах (для fixed)")
-    with_header: bool = Field(True, description="Приписывать к фрагменту заголовок документа/раздела при индексации")
+    with_header: bool = Field(
+        True, description="Приписывать к фрагменту заголовок документа/раздела при индексации"
+    )
 
 
 class BM25Config(_Strict):
