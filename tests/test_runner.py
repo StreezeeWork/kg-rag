@@ -44,13 +44,6 @@ EXTRA_DEV_UNANSWERABLE = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _no_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Переменные окружения перекрывают конфиг (см. config._ENV_OVERRIDES) — в тестах они не нужны.
-    for name in ("KBRAG_GENERATION_BACKEND", "KBRAG_LLM_BASE_URL", "KBRAG_LLM_MODEL", "KBRAG_CORPUS_DIR"):
-        monkeypatch.delenv(name, raising=False)
-
-
 @pytest.fixture()
 def gold(mini_gold_records: list[dict]) -> list[GoldItem]:
     return [item_from_record(record) for record in mini_gold_records]

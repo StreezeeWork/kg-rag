@@ -25,9 +25,8 @@ CONFIGS = ROOT / "configs"
 @pytest.fixture(autouse=True)
 def _project_root(monkeypatch: pytest.MonkeyPatch) -> None:
     # Пути в конфигах (base, corpus_dir) записаны от корня проекта, как при запуске `kbrag`.
+    # Переменные KBRAG_* убирает общая фикстура conftest._isolate_kbrag_env.
     monkeypatch.chdir(ROOT)
-    for name in ("KBRAG_GENERATION_BACKEND", "KBRAG_LLM_BASE_URL", "KBRAG_LLM_MODEL", "KBRAG_CORPUS_DIR"):
-        monkeypatch.delenv(name, raising=False)
 
 
 def experiment_configs() -> dict[str, AppConfig]:
@@ -98,7 +97,11 @@ def test_calibration_hint_in_config_mentions_save_flag(name: str) -> None:
 @pytest.mark.parametrize("url", ["localhost:8000/v1", "ftp://llm.test/v1", ""])
 def test_llm_base_url_without_http_scheme_fails_when_config_is_read(section: str, url: str) -> None:
     # Ошибка в адресе LLM видна при загрузке конфига, а не при первом вопросе к сервису.
-    data = {"generation": {"base_url": url}} if section == "generation" else {"eval": {"judge": {"base_url": url}}}
+    data = (
+        {"generation": {"base_url": url}}
+        if section == "generation"
+        else {"eval": {"judge": {"base_url": url}}}
+    )
     with pytest.raises(ValueError, match="http:// или https://"):
         AppConfig.model_validate(data)
 

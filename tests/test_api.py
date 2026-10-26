@@ -42,19 +42,6 @@ CONTEXT_FIELDS = {"index", "chunk_id", "doc_id", "title", "section", "score", "c
 ASK_REQUESTS = 'kbrag_requests_total{endpoint="/ask",status="%s"}'
 
 
-@pytest.fixture(autouse=True)
-def _no_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Переменные окружения перекрывают конфиг (см. config._ENV_OVERRIDES) — в тестах они не нужны.
-    for name in (
-        "KBRAG_CONFIG",
-        "KBRAG_GENERATION_BACKEND",
-        "KBRAG_LLM_BASE_URL",
-        "KBRAG_LLM_MODEL",
-        "KBRAG_CORPUS_DIR",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
 def scored(doc_id: str, n: int, text: str, score: float, section: str = "1. Раздел") -> ScoredChunk:
     chunk = Chunk(
         chunk_id=f"{doc_id}::{n:03d}",

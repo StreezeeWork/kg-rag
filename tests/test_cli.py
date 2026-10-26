@@ -39,19 +39,6 @@ EXTRA_DEV_UNANSWERABLE = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _no_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Переменные окружения перекрывают конфиг — в тестах они не должны влиять на результат.
-    for name in (
-        "KBRAG_CONFIG",
-        "KBRAG_GENERATION_BACKEND",
-        "KBRAG_LLM_BASE_URL",
-        "KBRAG_LLM_MODEL",
-        "KBRAG_CORPUS_DIR",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
 def write_jsonl(path: Path, records: list[dict]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records), encoding="utf-8")
