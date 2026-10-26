@@ -182,3 +182,14 @@ def test_make_reranker_enabled(fake_st: types.ModuleType) -> None:
         "cpu",
     )
     assert reranker.name == "rerank"
+    assert reranker.with_header is True  # по умолчанию — как у поисковиков (chunking.with_header=true)
+
+
+def test_make_reranker_passes_with_header(fake_st: types.ModuleType) -> None:
+    # Регрессия: make_reranker не передавал with_header, и при chunking.with_header=false
+    # поисковики индексировали фрагменты без заголовка, а реранкер всё равно видел заголовок.
+    reranker = make_reranker(RerankConfig(enabled=True, device="cpu"), with_header=False)
+    assert reranker.with_header is False
+    item = candidate("a::000", "Срок — 5 дней.", 1.0, title="Отпуск")
+    reranker.rerank("срок", [item], top_k=1)
+    assert reranker.model.predict_calls[0]["pairs"] == [("срок", "Срок — 5 дней.")]

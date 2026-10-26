@@ -66,8 +66,9 @@ class CrossEncoderReranker(Reranker):
     def rerank(self, query: str, candidates: list[ScoredChunk], top_k: int) -> list[ScoredChunk]:
         if not candidates or top_k <= 0:
             return []
-        # Реранкер видит тот же текст, что и индекс (с заголовком документа/раздела):
-        # фрагмент «Срок — 5 дней» без заголовка непонятно к чему относится.
+        # Реранкер видит тот же текст, что и индекс: with_header приходит из chunking.with_header
+        # (см. make_reranker). По умолчанию — с заголовком документа/раздела: фрагмент
+        # «Срок — 5 дней» без заголовка непонятно к чему относится.
         pairs = [(query, item.chunk.index_text(self.with_header)) for item in candidates]
         raw_scores = self.model.predict(pairs, batch_size=self.batch_size, show_progress_bar=False)
         scores = np.asarray(raw_scores, dtype=np.float64)
@@ -92,8 +93,13 @@ class CrossEncoderReranker(Reranker):
         return reranked[:top_k]
 
 
-def make_reranker(cfg: RerankConfig) -> Reranker | None:
-    """Создаёт реранкер по секции ``rerank`` конфига; ``None``, если реранкинг выключен."""
+def make_reranker(cfg: RerankConfig, *, with_header: bool = True) -> Reranker | None:
+    """Создаёт реранкер по секции ``rerank`` конфига; ``None``, если реранкинг выключен.
+
+    ``with_header`` передаётся из ``cfg.chunking.with_header`` (секция ``rerank`` о нарезке
+    ничего не знает): реранкер должен оценивать тот же текст фрагмента, что индексировали
+    поисковики. Иначе абляция «без заголовков» была бы нечестной — поиск без них, реранкер с ними.
+    """
     if not cfg.enabled:
         return None
     logger.info("Загружается реранкер %s", cfg.model)
@@ -102,4 +108,5 @@ def make_reranker(cfg: RerankConfig) -> Reranker | None:
         batch_size=cfg.batch_size,
         max_length=cfg.max_length,
         device=cfg.device,
+        with_header=with_header,
     )
