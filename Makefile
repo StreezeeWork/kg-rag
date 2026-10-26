@@ -1,0 +1,68 @@
+# Makefile — короткие команды для частых действий: `make <цель>`. Список целей: `make help`.
+#
+# На Windows запускайте из Git Bash (make можно поставить: `choco install make` или `winget install GnuWin32.Make`).
+# Любую переменную ниже можно переопределить в командной строке:
+#   make eval CONFIG=configs/default.yaml NAME=neural
+#   make test PYTHON=.venv/Scripts/python
+
+# Интерпретатор Python (по умолчанию — тот, что первый в PATH; удобно активировать venv заранее).
+PYTHON ?= python
+# Конфиг для eval и serve. Офлайн по умолчанию: работает без нейросетей и интернета.
+CONFIG ?= configs/offline.yaml
+# Имя прогона оценки: под ним результат появится в reports/.
+NAME ?= offline
+# Файл сетки экспериментов и дополнительные флаги для неё.
+EXPERIMENTS ?= configs/experiments.yaml
+GRID_ARGS ?=
+# Адрес локального сервера (127.0.0.1 — доступен только с этой машины).
+HOST ?= 127.0.0.1
+PORT ?= 8080
+# Индекс колёс torch: CPU-сборка в разы меньше CUDA. Для GPU: TORCH_INDEX=https://download.pytorch.org/whl/cu124
+TORCH_INDEX ?= https://download.pytorch.org/whl/cpu
+# Docker: имя образа, нейросети в образе (true/false), доп. флаги compose (например, --profile llm).
+IMAGE ?= kbrag:latest
+INSTALL_NEURAL ?= false
+COMPOSE_ARGS ?=
+
+# `make` без аргументов показывает справку, а не запускает что-то случайное.
+.DEFAULT_GOAL := help
+# Цели — это команды, а не файлы: без .PHONY файл с именем `test` сломал бы `make test`.
+.PHONY: help install install-neural lint test data eval grid serve docker-build docker-up
+
+help: ## Показать список команд
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+install: ## Установить пакет в режиме разработки: ядро + pytest и ruff
+	$(PYTHON) -m pip install -e ".[dev]"
+
+# Сначала torch из CPU-индекса, иначе pip скачает с PyPI сборку с CUDA на несколько ГБ.
+install-neural: ## То же + sentence-transformers и torch (CPU) — нужно для configs/default.yaml
+	$(PYTHON) -m pip install --index-url $(TORCH_INDEX) "torch>=2.2"
+	$(PYTHON) -m pip install -e ".[dev,neural]"
+
+lint: ## Проверить стиль и типичные ошибки (ruff)
+	$(PYTHON) -m ruff check .
+
+test: ## Запустить тесты (нейросетевые пропускаются, пока не задано KBRAG_RUN_NEURAL=1)
+	$(PYTHON) -m pytest
+
+data: ## Собрать data/eval/gold.jsonl из data/eval/parts и проверить корпус и эталон
+	$(PYTHON) -m kbrag build-gold
+	$(PYTHON) -m kbrag validate-data
+
+eval: ## Оценить один конфиг: make eval CONFIG=configs/default.yaml NAME=neural
+	$(PYTHON) -m kbrag eval --config $(CONFIG) --name $(NAME)
+
+grid: ## Прогнать сетку экспериментов → reports/grid/leaderboard.md (GRID_ARGS="--include-heavy")
+	$(PYTHON) -m kbrag grid --experiments $(EXPERIMENTS) $(GRID_ARGS)
+
+serve: ## Запустить API и веб-страницу на http://127.0.0.1:8080 с перезапуском при правке кода
+	KBRAG_CONFIG=$(CONFIG) $(PYTHON) -m uvicorn kbrag.api.app:app --host $(HOST) --port $(PORT) --reload
+
+docker-build: ## Собрать Docker-образ (make docker-build INSTALL_NEURAL=true — с нейросетями)
+	docker build --build-arg INSTALL_NEURAL=$(INSTALL_NEURAL) -t $(IMAGE) .
+
+# INSTALL_NEURAL, KBRAG_CONFIG и др. compose читает из окружения или файла .env;
+# переменные из командной строки make (`make docker-up INSTALL_NEURAL=true`) тоже попадают в окружение.
+docker-up: ## Поднять сервис в docker compose (с LLM: make docker-up COMPOSE_ARGS="--profile llm")
+	docker compose $(COMPOSE_ARGS) up --build

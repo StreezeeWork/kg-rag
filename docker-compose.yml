@@ -1,0 +1,96 @@
+# Локальный запуск kb-rag в Docker.
+#
+#   docker compose up --build
+#       только сервис: офлайн-конфиг (BM25 + LSA, ответы без LLM), GPU не нужен.
+#
+#   INSTALL_NEURAL=true KBRAG_CONFIG=configs/default.yaml docker compose up --build
+#       сервис с нейросетевым поиском и реранкером (образ с torch для CPU).
+#
+#   KBRAG_GENERATION_BACKEND=openai docker compose --profile llm up --build
+#       + локальная LLM (vLLM) на видеокарте NVIDIA; ответы пишет модель, а не extractive-генератор.
+#       Нужны драйвер NVIDIA и NVIDIA Container Toolkit; первая загрузка модели (~15 ГБ) занимает время.
+#
+# Веб-интерфейс: http://localhost:8080   LLM API: http://localhost:8000/v1
+# Значения вида ${VAR:-по_умолчанию} можно задать в файле .env рядом с этим файлом (см. .env.example).
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        # true → образ с sentence-transformers и torch (нужен для configs/default.yaml).
+        INSTALL_NEURAL: ${INSTALL_NEURAL:-false}
+    image: kbrag:latest
+    ports:
+      # 127.0.0.1 — сервис доступен только с этой машины; уберите префикс, чтобы открыть его в сеть.
+      - "127.0.0.1:8080:8080"
+    environment:
+      KBRAG_CONFIG: ${KBRAG_CONFIG:-configs/offline.yaml}
+      # Пусто → backend берётся из конфига (extractive); openai → ответы генерирует LLM.
+      KBRAG_GENERATION_BACKEND: ${KBRAG_GENERATION_BACKEND:-}
+      # Внутри сети compose контейнеры видят друг друга по имени сервиса: llm, а не localhost.
+      KBRAG_LLM_BASE_URL: ${KBRAG_LLM_BASE_URL:-http://llm:8000/v1}
+      # Должно совпадать с моделью, которую загрузил vLLM (ниже используется та же переменная).
+      KBRAG_LLM_MODEL: ${KBRAG_LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      # Ключ передаём только через окружение; пустой — если сервер LLM без авторизации.
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      HF_HOME: /app/.cache/huggingface
+    volumes:
+      # Скачанные модели и кэш эмбеддингов переживают пересоздание контейнера.
+      - app-cache:/app/.cache
+    depends_on:
+      llm:
+        # С профилем llm сервис ждёт, пока модель загрузится; без профиля зависимость просто
+        # пропускается (required: false), и app стартует один.
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+
+  llm:
+    # Профиль: сервис поднимается только с флагом `--profile llm`, обычный `docker compose up` его не трогает.
+    profiles: ["llm"]
+    # Версия образа зафиксирована ради воспроизводимости; обновлять осознанно.
+    image: vllm/vllm-openai:${VLLM_VERSION:-v0.8.5}
+    command:
+      - --model
+      - ${KBRAG_LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      # Контекст 8K с запасом покрывает промпт (~6000 символов контекста) и ответ,
+      # а KV-кэш на 8K помещается в одну GPU 24 ГБ вместе с 7B-моделью в bf16.
+      # Для GPU 16 ГБ возьмите квантованную модель: KBRAG_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ.
+      - --max-model-len
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.90"
+    environment:
+      # Если задан LLM_API_KEY, vLLM будет требовать его в заголовке Authorization; пусто → без ключа.
+      VLLM_API_KEY: ${LLM_API_KEY:-}
+      # Нужен только для закрытых (gated) моделей на Hugging Face; Qwen2.5 открыта.
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Веса модели скачиваются один раз и хранятся в именованном томе.
+      - hf-models:/root/.cache/huggingface
+    # vLLM использует разделяемую память между процессами; маленький /dev/shm Docker приводит к падениям.
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # Резервируем одну видеокарту NVIDIA (count: all — все доступные).
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      # /health отвечает 200, когда модель загружена и сервер готов принимать запросы.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # Первый запуск скачивает веса и прогревает модель — даём до 10 минут без штрафа.
+      start_period: 600s
+    restart: unless-stopped
+
+volumes:
+  app-cache:
+  hf-models:

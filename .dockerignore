@@ -1,0 +1,39 @@
+# Что НЕ отправляется в контекст сборки Docker.
+# Меньше контекст — быстрее `docker build` и меньше шанс случайно запечь в образ лишнее (секреты, кэши).
+
+# Git и CI
+.git
+.github
+
+# Виртуальные окружения и кэши Python/инструментов
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.cache
+
+# Секреты: .env никогда не должен попадать в образ
+.env
+
+# Отчёты оценки не нужны сервису — кроме файлов калибровки порога отказа
+reports/*
+!reports/.gitkeep
+!reports/calibration*.json
+
+# Не нужно во время работы сервиса
+tests
+docs
+scripts
+Dockerfile
+docker-compose.yml
+Makefile
+
+# Файлы редакторов и ОС
+.idea
+.vscode
+**/.DS_Store
+**/Thumbs.db
