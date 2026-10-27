@@ -28,12 +28,12 @@ import hashlib
 import logging
 import math
 import os
-import re
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -74,7 +74,6 @@ _BODY_TOO_LARGE_DETAIL = (
 ALLOWED_HOSTS_ENV_VAR = "KBRAG_ALLOWED_HOSTS"
 DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "[::1]", "app", "testserver")
 LOG_LEVEL_ENV_VAR = "KBRAG_LOG_LEVEL"
-_INLINE_SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.DOTALL)
 
 # Флаги ответа, которые означают подозрение на prompt injection (см. kbrag.generation.guardrails).
 CONTEXT_INJECTION_PREFIX = "prompt_injection"
@@ -502,6 +501,44 @@ def allowed_hosts_from_env() -> list[str]:
     return hosts or list(DEFAULT_ALLOWED_HOSTS)
 
 
+class _InlineScriptCollector(HTMLParser):
+    """Собирает текст встроенных ``<script>`` ровно так, как его видит браузер."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.scripts: list[str] = []
+        self._parts: list[str] | None = None  # не None — мы внутри встроенного <script>
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # Внешний скрипт (<script src=…>) по хешу не разрешается — его текст нам не нужен.
+        if tag == "script" and not any(name == "src" for name, _ in attrs):
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._parts is not None:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self._parts is not None:
+            self.scripts.append("".join(self._parts))
+            self._parts = None
+
+
+def inline_scripts(html: str) -> list[str]:
+    """Тексты встроенных ``<script>`` страницы — для хешей в Content-Security-Policy.
+
+    Почему не регулярка ``<script>(.*?)</script>``: она не знает про HTML-комментарии. В шапке
+    index.html есть комментарий со словом «<script>», регулярка начинала совпадение с него,
+    и хеш считался от «комментарий + стили + скрипт». Браузер хеширует только сам скрипт,
+    хеши не совпадали — и браузер блокировал скрипт: страница переставала отправлять вопросы.
+    HTMLParser, как и браузер, пропускает комментарии, а содержимое <script> отдаёт дословно.
+    """
+    collector = _InlineScriptCollector()
+    collector.feed(html)
+    collector.close()
+    return collector.scripts
+
+
 def _index_csp() -> str:
     """Content-Security-Policy для веб-страницы: только свои ресурсы и только наш встроенный скрипт.
 
@@ -511,7 +548,7 @@ def _index_csp() -> str:
     html = INDEX_HTML.read_text(encoding="utf-8")
     hashes = [
         "'sha256-" + base64.b64encode(hashlib.sha256(script.encode("utf-8")).digest()).decode("ascii") + "'"
-        for script in _INLINE_SCRIPT_RE.findall(html)
+        for script in inline_scripts(html)
     ]
     script_src = " ".join(hashes) or "'none'"
     return (

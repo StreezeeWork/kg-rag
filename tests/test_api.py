@@ -29,6 +29,7 @@ from kbrag.api.app import (
     config_from_env,
     count_injection_flags,
     create_app,
+    inline_scripts,
 )
 from kbrag.config import AppConfig
 from kbrag.generation import LLMError
@@ -353,9 +354,23 @@ def test_security_headers_and_page_csp(client: TestClient) -> None:
     csp = page.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in csp and "default-src 'self'" in csp
     # Разрешён ровно встроенный скрипт страницы — по хешу, а не 'unsafe-inline'.
-    script = re.search(r"<script>(.*?)</script>", page.text, re.DOTALL).group(1)
+    # Скрипт извлекаем НЕ той же функцией, что сервер: сначала вырезаем HTML-комментарии, как это
+    # делает браузер. Раньше тест повторял регулярку сервера и вместе с ней ошибался: в комментарии
+    # наверху страницы есть слово «<script>», хеш считался не от того текста, и браузер блокировал скрипт.
+    without_comments = re.sub(r"<!--.*?-->", "", page.text, flags=re.DOTALL)
+    script = re.search(r"<script>(.*?)</script>", without_comments, re.DOTALL).group(1)
+    assert "use strict" in script  # это действительно код страницы, а не кусок разметки
     digest = base64.b64encode(hashlib.sha256(script.encode("utf-8")).digest()).decode("ascii")
     assert f"'sha256-{digest}'" in csp and "unsafe-inline" not in csp.split("script-src")[1].split(";")[0]
+
+
+def test_inline_scripts_skip_comments_and_external_scripts() -> None:
+    html = (
+        "<!-- пример вредной вставки: <script>alert(1)</script> -->\n"
+        '<p>текст</p><script src="lib.js"></script>\n'
+        "<script>run('<b>ok</b>');</script>"
+    )
+    assert inline_scripts(html) == ["run('<b>ok</b>');"]
 
 
 @pytest.mark.parametrize(
