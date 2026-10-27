@@ -9,13 +9,19 @@
 
     вопрос ──► retrieve(): поиск candidates_k/top_k ──► [реранкер] ──► top_k фрагментов
            ──► confidence(): насколько поиск «уверен», что нашёл ответ
+               [abstain_score(): P(нет ответа) по классификатору — если abstention.method: classifier]
            ──► guardrails: пометить и вычистить инъекции во фрагментах
-           ──► confidence < threshold? ──да──► отказ (генератор не вызывается)
-                                       └─нет─► генератор ──► разбор ссылок [n]
+           ──► отказ? ──да──► отказ (генератор не вызывается)
+                      └─нет─► генератор ──► разбор ссылок [n]
 
-Порог отказа подбирается при оценке (``kbrag eval``) на dev-выборке и сохраняется в файл
-калибровки. Сервис читает его, только если файл посчитан для того же поиска (совпадает
-``calibration_fingerprint``): порог BM25 бессмысленно применять к косинусам dense.
+Решение об отказе принимается одним из двух способов (``abstention.method``):
+
+* ``threshold`` — ``confidence < threshold``. Порог подбирается при оценке (``kbrag eval``) на dev
+  и сохраняется в файл калибровки. Сервис читает его, только если файл посчитан для того же поиска
+  (совпадает ``calibration_fingerprint``): порог BM25 бессмысленно применять к косинусам dense.
+* ``classifier`` — ``p >= decision_threshold``, где p — вероятность «в базе нет ответа» от модели
+  ``kbrag.abstention`` (обучает ``kbrag train-abstention``). Модель защищена тем же отпечатком
+  поиска и корпуса; нет подходящей модели — предупреждение и откат на ``threshold``.
 """
 
 from __future__ import annotations
@@ -26,6 +32,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from kbrag.abstention.features import extract_features
+from kbrag.abstention.models import AbstentionModel, load_abstention_model
 from kbrag.config import AppConfig, config_fingerprint
 from kbrag.generation import (
     ABSTAIN_TEXT,
@@ -44,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 # Флаг ответа, который поставлен из-за низкой уверенности поиска (а не по решению генератора).
 LOW_CONFIDENCE_FLAG = "low_confidence"
+# Отказ по решению классификатора отказа (abstention.method: classifier). Отдельный флаг, а не
+# low_confidence: в логах и в отчёте должно быть видно, какой из двух методов отказал.
+ABSTAIN_CLASSIFIER_FLAG = "abstain_classifier"
 # Не все найденные фрагменты влезли в лимит generation.max_context_chars: генератор видел только начало выдачи.
 CONTEXT_TRUNCATED_FLAG = "context_truncated"
 
@@ -214,11 +225,14 @@ def _calibration_path(cfg: AppConfig) -> Path | None:
 
 
 class RAGPipeline:
-    """Связывает поиск, реранкер, порог отказа, guardrails и генератор в один вызов ``answer``.
+    """Связывает поиск, реранкер, решение об отказе, guardrails и генератор в один вызов ``answer``.
 
     Обычно создаётся через ``RAGPipeline.from_config(cfg)``. Конструктор принимает готовые
     компоненты — это удобно в тестах: можно подставить генератор-«шпион» или фальшивый
     реранкер, не трогая остальное. Ретривер в конструктор передаётся **уже проиндексированным**.
+
+    ``abstention_model`` — классификатор отказа. Если он передан, решение об отказе принимает
+    он (``threshold`` тогда не используется); None — работает пороговый метод.
     """
 
     def __init__(
@@ -230,12 +244,14 @@ class RAGPipeline:
         threshold: float | None = None,
         docs: list[Document] | None = None,
         chunks: list[Chunk] | None = None,
+        abstention_model: AbstentionModel | None = None,
     ) -> None:
         self.cfg = cfg
         self.retriever = retriever
         self.generator = generator
         self.reranker = reranker
         self.threshold = threshold
+        self.abstention_model = abstention_model
         # Фрагменты берём у ретривера, если их не передали явно: они нужны для статистики
         # и для метрик (по chunk_id из ссылки находим исходный фрагмент).
         self.chunks: list[Chunk] = (
@@ -263,26 +279,51 @@ class RAGPipeline:
         retriever.index(chunks)
         index_time_ms = _elapsed_ms(started)
 
+        corpus_sha256 = corpus_fingerprint(list(docs))
+        abstention_model = None
+        if cfg.abstention.enabled and cfg.abstention.method == "classifier":
+            abstention_model = load_abstention_model(cfg, corpus_sha256=corpus_sha256)
+            if abstention_model is None:
+                logger.warning(
+                    "Классификатор отказа недоступен: откат на пороговый метод (abstention.threshold)"
+                )
+        # При рабочем классификаторе порог не нужен: решает модель, а не одно число.
+        threshold = None
+        if abstention_model is None:
+            threshold = resolve_threshold(cfg, corpus_sha256=corpus_sha256)
         pipeline = cls(
             cfg,
             retriever=retriever,
             generator=make_generator(cfg.generation),
             # Реранкер должен видеть тот же текст фрагмента, что и индекс (с заголовком или без).
             reranker=make_reranker(cfg.rerank, with_header=cfg.chunking.with_header),
-            threshold=resolve_threshold(cfg, corpus_sha256=corpus_fingerprint(list(docs))),
+            threshold=threshold,
             docs=list(docs),
             chunks=chunks,
+            abstention_model=abstention_model,
         )
         pipeline.index_stats = pipeline._compute_index_stats(index_time_ms=index_time_ms)
         logger.info(
-            "Пайплайн готов: %d документов, %d фрагментов, индекс за %.0f мс, порог %s, уверенность по %s",
+            "Пайплайн готов: %d документов, %d фрагментов, индекс за %.0f мс, отказ: %s, порог %s, уверенность по %s",
             pipeline.index_stats["n_docs"],
             pipeline.index_stats["n_chunks"],
             index_time_ms,
+            pipeline.abstention_method,
             pipeline.threshold,
             pipeline.score_source,
         )
         return pipeline
+
+    @property
+    def abstention_method(self) -> str:
+        """Чем на самом деле решается отказ: ``classifier:<тип модели>`` или ``threshold``.
+
+        Может отличаться от ``cfg.abstention.method``: без подходящего файла модели сервис
+        откатывается на порог — и ``/health`` должен честно показывать, что работает сейчас.
+        """
+        if self.abstention_model is not None:
+            return f"classifier:{self.abstention_model.model_type}"
+        return "threshold"
 
     # --- шаги пайплайна ---
 
@@ -325,6 +366,17 @@ class RAGPipeline:
         """
         values = [item.details[self.score_source] for item in contexts if self.score_source in item.details]
         return max(values) if values else None
+
+    def abstain_score(self, question: str, contexts: list[ScoredChunk]) -> float | None:
+        """P(в базе нет ответа) по классификатору отказа; None, если классификатор не используется.
+
+        ``contexts`` — те же фрагменты, по которым считается ``confidence`` (первые
+        ``cfg.retrieval.top_k``): на них модель обучалась (``abstention.train.feature_table``).
+        Признаки — только из выдачи и текста вопроса (``abstention.features``).
+        """
+        if self.abstention_model is None:
+            return None
+        return self.abstention_model.predict_one(extract_features(question, contexts))
 
     def answer(self, question: str, top_k: int | None = None, apply_threshold: bool = True) -> Answer:
         """Полный ответ на вопрос: поиск + решение об отказе + генерация со ссылками.
@@ -371,7 +423,10 @@ class RAGPipeline:
         search_ms = timings["retrieve_ms"] + timings["rerank_ms"]
         guardrails = self.cfg.guardrails
         flags = check_question(question) if guardrails.enabled else []
-        confidence = self.confidence(contexts if confidence_contexts is None else confidence_contexts)
+        decision_contexts = contexts if confidence_contexts is None else confidence_contexts
+        confidence = self.confidence(decision_contexts)
+        # Считаем всегда (и при apply_threshold=False): оценка применяет порог модели постфактум.
+        abstain_score = self.abstain_score(question, decision_contexts)
 
         # Guardrails — ДО решения об отказе: пометки «подозрительный текст» нужны и тогда, когда
         # генератор не вызывается. При отказе пользователь всё равно видит найденные фрагменты
@@ -383,7 +438,8 @@ class RAGPipeline:
             prompt_contexts, injection_flags = sanitize_contexts(contexts, action=guardrails.action)
             flags.extend(injection_flags)
 
-        if apply_threshold and self.should_abstain(confidence):
+        abstain_flag = self.abstention_flag(confidence, abstain_score) if apply_threshold else None
+        if abstain_flag is not None:
             # Отказываемся до генерации: экономим вызов LLM и не даём ей «додумать» ответ
             # по нерелевантным фрагментам. Контексты всё равно возвращаем — для отладки.
             timings["generate_ms"] = 0.0
@@ -395,8 +451,9 @@ class RAGPipeline:
                 contexts=contexts,
                 abstained=True,
                 timings_ms=timings,
-                flags=[*flags, LOW_CONFIDENCE_FLAG],
+                flags=[*flags, abstain_flag],
                 confidence=confidence,
+                abstain_score=abstain_score,
             )
 
         # Лимит длины контекста применяем здесь, один раз для любого генератора: extractive и LLM
@@ -433,7 +490,24 @@ class RAGPipeline:
             usage=dict(result.usage),
             invalid_citations=invalid,
             confidence=confidence,
+            abstain_score=abstain_score,
         )
+
+    def abstention_flag(self, confidence: float | None, abstain_score: float | None) -> str | None:
+        """Отказаться ли до генерации — и почему: флаг причины или None («отвечаем»).
+
+        С классификатором решает только он (``p >= decision_threshold`` → ``abstain_classifier``);
+        без него — порог по уверенности (``low_confidence``). Два метода не складываются:
+        классификатор уже видит ту же уверенность как признак ``<источник>_top1``.
+        """
+        if not self.cfg.abstention.enabled:
+            return None
+        if self.abstention_model is not None:
+            # abstain_score не бывает None при загруженной модели; проверка — на случай чужого вызова.
+            if abstain_score is not None and self.abstention_model.abstains(abstain_score):
+                return ABSTAIN_CLASSIFIER_FLAG
+            return None
+        return LOW_CONFIDENCE_FLAG if self.should_abstain(confidence) else None
 
     def should_abstain(self, confidence: float | None) -> bool:
         """Отказаться ли по порогу: порог задан и уверенность ниже (или её нет вовсе).

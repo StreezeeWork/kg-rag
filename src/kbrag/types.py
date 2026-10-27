@@ -85,3 +85,5 @@ class Answer:
     usage: dict[str, int] = field(default_factory=dict)
     invalid_citations: int = 0
     confidence: float | None = None  # «уверенность» поиска, по ней принимается решение об отказе
+    # P(в базе нет ответа) от классификатора отказа; None — классификатор не используется
+    abstain_score: float | None = None

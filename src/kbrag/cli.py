@@ -467,11 +467,19 @@ def _print_answer(payload: dict[str, Any]) -> None:
     print(payload["answer"])
     print()
     if payload["abstained"]:
-        reason = "низкая уверенность поиска" if "low_confidence" in payload["flags"] else "решение генератора"
+        reason = "решение генератора"
+        if "low_confidence" in payload["flags"]:
+            reason = "низкая уверенность поиска"
+        elif "abstain_classifier" in payload["flags"]:
+            reason = "классификатор отказа"
         print(f"Отказ: да ({reason})")
     confidence = payload["confidence"]
     total_ms = payload["timings_ms"].get("total_ms", 0.0)
-    print(f"Уверенность: {'—' if confidence is None else f'{confidence:.3f}'}; время: {total_ms:.0f} мс")
+    abstain_score = payload.get("abstain_score")
+    p_text = "" if abstain_score is None else f"; P(нет ответа): {abstain_score:.3f}"
+    print(
+        f"Уверенность: {'—' if confidence is None else f'{confidence:.3f}'}{p_text}; время: {total_ms:.0f} мс"
+    )
     # Сверяем по chunk_id, а не по номеру: при guardrails.action=drop_chunk генератор видит
     # не все фрагменты, и номер [n] в ответе может не совпасть с позицией фрагмента в выдаче.
     cited = {citation["chunk_id"] for citation in payload["citations"]}
@@ -556,6 +564,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
 def _print_eval_summary(result: ExperimentResult) -> None:
     threshold = "не задан" if result.threshold is None else format_number(result.threshold)
+    if result.threshold is not None and (result.score_source or "").startswith("classifier"):
+        threshold += f" ({result.score_source}: отказ, если P(нет ответа) ≥ порога)"
     print(f"Эксперимент: {result.name}")
     print(f"Порог отказа: {threshold}")
     n_questions = format_number(result.metric("n_questions", GATE_SPLIT))
@@ -569,6 +579,11 @@ def _calibration_not_saveable(cfg: AppConfig) -> str | None:
     abstention = cfg.abstention
     if not abstention.enabled:
         return "отказ по порогу выключен (abstention.enabled: false) — сохранять нечего"
+    if abstention.method == "classifier":
+        return (
+            "abstention.method: classifier — порог хранится в файле модели отказа "
+            "(kbrag train-abstention), калибровка по уверенности не подбирается"
+        )
     if abstention.threshold != "auto":
         return (
             f"порог не подбирается: abstention.threshold={abstention.threshold!r} задан в конфиге, "

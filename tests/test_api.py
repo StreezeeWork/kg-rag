@@ -37,7 +37,17 @@ from kbrag.generation.citations import CITATION_RE
 from kbrag.pipeline import RAGPipeline
 from kbrag.types import Answer, Chunk, Citation, Document, ScoredChunk
 
-RESPONSE_FIELDS = {"answer", "abstained", "confidence", "citations", "contexts", "timings_ms", "flags"}
+# abstain_score — P(нет ответа) от классификатора отказа (null при пороговом методе).
+RESPONSE_FIELDS = {
+    "answer",
+    "abstained",
+    "confidence",
+    "abstain_score",
+    "citations",
+    "contexts",
+    "timings_ms",
+    "flags",
+}
 CITATION_FIELDS = {"index", "context_index", "chunk_id", "doc_id", "title"}
 CONTEXT_FIELDS = {"index", "chunk_id", "doc_id", "title", "section", "score", "confidence_score", "text"}
 ASK_REQUESTS = 'kbrag_requests_total{endpoint="/ask",status="%s"}'
@@ -126,6 +136,7 @@ def test_ask_returns_exactly_the_fields_the_web_page_uses(client: TestClient, fa
     assert body["answer"] == "Отпуск — 28 календарных дней [1]."
     assert body["abstained"] is False
     assert body["confidence"] == pytest.approx(0.42)
+    assert body["abstain_score"] is None  # классификатор отказа не используется
     assert body["citations"] == [
         {
             "index": 1,

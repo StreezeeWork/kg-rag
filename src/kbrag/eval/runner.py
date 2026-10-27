@@ -8,9 +8,13 @@
 3. Порог ``"auto"`` подбираем ``metrics.choose_threshold`` **только на dev**. Если бы в подборе
    участвовал test, метрики test были бы завышены: порог «подогнан» под те же вопросы,
    на которых его потом проверяют (утечка данных).
+   С классификатором отказа (``abstention.method: classifier``) порог **не подбирается**: он уже
+   подобран на dev при обучении (``kbrag train-abstention``) и лежит в файле модели. Без файла
+   модели прогон падает с подсказкой — молча оценить вместо классификатора порог было бы обманом.
 4. Порог применяем постфактум ко всем вопросам: ответ считается отказом, если отказался
-   генератор ИЛИ уверенность ниже порога. Для метрик такой ответ заменяется на
-   ``ABSTAIN_TEXT``, ссылки обнуляются — ровно то, что вернул бы сервис.
+   генератор ИЛИ уверенность ниже порога (у классификатора — P(нет ответа) ≥ порога модели).
+   Для метрик такой ответ заменяется на ``ABSTAIN_TEXT``, ссылки обнуляются — ровно то,
+   что вернул бы сервис.
 5. Считаем метрики по каждому вопросу и усредняем по сплитам ``dev`` / ``test`` / ``all``
    и по типам вопросов (для сплита отчёта).
 
@@ -58,6 +62,7 @@ from kbrag.eval.metrics import (
 from kbrag.eval.results import (
     AUROC_SPLITS,
     BY_TYPE_KEY,
+    CLASSIFIER_SOURCE,
     GENERATION_METRICS,
     METRIC_SPLITS,
     SCORE_SOURCES,
@@ -67,7 +72,7 @@ from kbrag.eval.results import (
 )
 from kbrag.generation import ABSTAIN_TEXT, LLMError
 from kbrag.ingest import corpus_fingerprint, load_corpus
-from kbrag.pipeline import LOW_CONFIDENCE_FLAG, RAGPipeline
+from kbrag.pipeline import ABSTAIN_CLASSIFIER_FLAG, LOW_CONFIDENCE_FLAG, RAGPipeline
 from kbrag.retrieval import neural_available
 from kbrag.types import Answer, Citation, Document, ScoredChunk
 
@@ -108,7 +113,15 @@ def run_experiment(
     pipeline_cfg = cfg.model_copy(
         update={"abstention": cfg.abstention.model_copy(update={"threshold": None})}
     )
+    # Классификатор отказа (если он выбран в конфиге) пайплайн загружает сам — тем же кодом, что сервис.
     pipeline = RAGPipeline.from_config(pipeline_cfg, docs=docs)
+    classifier = _uses_classifier(cfg)
+    if classifier and pipeline.abstention_model is None:
+        raise ValueError(
+            f"abstention.method: classifier, но модель отказа {cfg.abstention.model_path} не загрузилась "
+            "(нет файла или она обучена для другого поиска/корпуса — причина в предупреждении выше): "
+            "сначала kbrag train-abstention --config <этот конфиг>"
+        )
     logger.info("Эксперимент %r: %d вопросов, индекс %s", name, len(gold), pipeline.index_stats)
 
     # Шаг 2: все вопросы без порога. Поиск достаём на max(k) фрагментов, чтобы честно
@@ -136,13 +149,20 @@ def run_experiment(
     if llm_errors:
         logger.warning("Эксперимент %r: %d из %d вопросов без ответа LLM", name, llm_errors, len(gold))
 
-    # Шаг 3: порог.
-    threshold = _resolve_eval_threshold(cfg, runs)
+    # Шаг 3: порог. У классификатора — из файла модели, без подбора.
+    if classifier:
+        threshold = pipeline.abstention_model.decision_threshold
+    else:
+        threshold = _resolve_eval_threshold(cfg, runs)
 
     # Шаги 4–5: применяем порог и считаем метрики.
     docs_by_id = {doc.doc_id: doc for doc in docs}
     sources = _available_sources(runs)
-    per_question = [_score_question(run, threshold, pipeline, docs_by_id, k_values, sources) for run in runs]
+    per_question = [
+        _score_question(run, threshold, pipeline, docs_by_id, k_values, sources, classifier=classifier)
+        for run in runs
+    ]
+    auroc_sources = [*sources, CLASSIFIER_SOURCE] if classifier else sources
     metrics = _split_metrics(per_question, k_values, cfg.eval.report_split)
     logger.info(
         "Эксперимент %r готов: порог %s, recall@5(test)=%s",
@@ -157,10 +177,16 @@ def run_experiment(
         per_question=per_question,
         threshold=threshold,
         index_stats=dict(pipeline.index_stats),
-        score_source=pipeline.score_source,
+        # Шкала порога: у классификатора это P(нет ответа), а не score поиска.
+        score_source=pipeline.abstention_method if classifier else pipeline.score_source,
         provenance=data_fingerprint(docs, gold),
-        confidence_auroc=confidence_auroc(per_question, sources),
+        confidence_auroc=confidence_auroc(per_question, auroc_sources),
     )
+
+
+def _uses_classifier(cfg: AppConfig) -> bool:
+    """Решает ли отказ классификатор (а не порог по уверенности) в этом конфиге."""
+    return cfg.abstention.enabled and cfg.abstention.method == "classifier"
 
 
 def data_fingerprint(docs: Sequence[Document], gold: Sequence[GoldItem]) -> dict[str, Any]:
@@ -199,6 +225,7 @@ def _llm_error_answer(
         timings_ms={**timings, "generate_ms": 0.0, "total_ms": search_ms},
         flags=[LLM_ERROR_FLAG],
         confidence=pipeline.confidence(contexts),
+        abstain_score=pipeline.abstain_score(question, contexts),
     )
 
 
@@ -263,12 +290,20 @@ def _available_sources(runs: Sequence[_QuestionRun]) -> list[str]:
     return [source for source in SCORE_SOURCES if source in present]
 
 
-def _confidence_by_source(contexts: Sequence[ScoredChunk], sources: Sequence[str]) -> dict[str, float | None]:
-    """Уверенность по каждому источнику — по тому же правилу, что ``RAGPipeline.confidence`` (максимум)."""
+def _confidence_by_source(
+    contexts: Sequence[ScoredChunk], sources: Sequence[str], abstain_score: float | None = None
+) -> dict[str, float | None]:
+    """Уверенность по каждому источнику — по тому же правилу, что ``RAGPipeline.confidence`` (максимум).
+
+    Если есть оценка классификатора отказа, добавляется ``"classifier": 1 − p``: так у всех
+    источников «больше — вероятнее, что ответ есть», и AUROC считается одной функцией.
+    """
     result: dict[str, float | None] = {}
     for source in sources:
         values = [item.details[source] for item in contexts if source in item.details]
         result[source] = max(values) if values else None
+    if abstain_score is not None:
+        result[CLASSIFIER_SOURCE] = 1.0 - abstain_score
     return result
 
 
@@ -307,17 +342,31 @@ def _score_question(
     docs_by_id: dict[str, Document],
     k_values: Sequence[int],
     sources: Sequence[str] = (),
+    classifier: bool = False,
 ) -> dict[str, Any]:
-    """Строка ``per_question``: что спросили, что ответили и метрики этого вопроса."""
+    """Строка ``per_question``: что спросили, что ответили и метрики этого вопроса.
+
+    ``classifier=True`` — ``threshold`` относится к P(нет ответа) классификатора (отказ, если
+    ``abstain_score >= threshold``, как ``AbstentionModel.abstains``), иначе — к уверенности поиска.
+    """
     item, answer = run.item, run.answer
-    below_threshold = threshold is not None and (answer.confidence is None or answer.confidence < threshold)
+    if classifier:
+        rule_flag = ABSTAIN_CLASSIFIER_FLAG
+        below_threshold = (
+            threshold is not None and answer.abstain_score is not None and answer.abstain_score >= threshold
+        )
+    else:
+        rule_flag = LOW_CONFIDENCE_FLAG
+        below_threshold = threshold is not None and (
+            answer.confidence is None or answer.confidence < threshold
+        )
     abstained = answer.abstained or below_threshold
 
     # Так ответил бы сервис с этим порогом: фиксированная фраза отказа и никаких ссылок.
     text = ABSTAIN_TEXT if abstained else answer.text
     citations: list[Citation] = [] if abstained else list(answer.citations)
     n_invalid = 0 if abstained else answer.invalid_citations
-    flags = list(answer.flags) + ([LOW_CONFIDENCE_FLAG] if below_threshold else [])
+    flags = list(answer.flags) + ([rule_flag] if below_threshold else [])
     # При отказе по порогу сервис не вызывает генератор — не учитываем его время в латентности.
     latency = answer.timings_ms.get("total_ms", 0.0)
     if below_threshold:
@@ -358,7 +407,8 @@ def _score_question(
         "answer": text,
         "abstained": abstained,
         "confidence": answer.confidence,
-        "confidence_by_source": _confidence_by_source(answer.contexts, sources),
+        "abstain_score": answer.abstain_score,
+        "confidence_by_source": _confidence_by_source(answer.contexts, sources, answer.abstain_score),
         "retrieved": list(run.retrieved_ids),
         "flags": flags,
         "latency_ms": round(latency, 3),
@@ -544,6 +594,15 @@ def _skip_reason(spec: ExperimentSpec, cfg: AppConfig, include_heavy: bool) -> s
         return "нужны нейросетевые зависимости (sentence-transformers): pip install -e .[neural]"
     if spec.heavy and not include_heavy:
         return "тяжёлый эксперимент (heavy): запускается только с include_heavy=True"
+    # Файла модели нет — пропуск, а не падение всей сетки: модель обучают отдельной командой,
+    # и до первого обучения сетка должна проходить. Модель есть, но устарела (другой поиск или
+    # корпус) — это уже ошибка run_experiment: устаревшую модель надо переобучить, а не прятать.
+    model_path = cfg.abstention.model_path
+    if _uses_classifier(cfg) and not (model_path and Path(model_path).is_file()):
+        return (
+            f"нет файла модели отказа {model_path}: сначала kbrag train-abstention "
+            "--config <конфиг с теми же настройками поиска>"
+        )
     return None
 
 

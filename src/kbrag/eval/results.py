@@ -45,6 +45,10 @@ TIMING_KEYS = frozenset({*LATENCY_METRICS, "latency_ms", "index_time_ms"})
 # Источники уверенности поиска (поля ScoredChunk.details), для которых считается AUROC
 # «отвечаемый vs неотвечаемый» — см. ExperimentResult.confidence_auroc.
 SCORE_SOURCES = ("rerank", "dense", "bm25")
+# Классификатор отказа (kbrag.abstention) — ещё один «источник уверенности» для таблицы AUROC:
+# его уверенность = 1 − P(нет ответа), чтобы «больше — вероятнее, что ответ есть», как у остальных.
+CLASSIFIER_SOURCE = "classifier"
+AUROC_SOURCES = (*SCORE_SOURCES, CLASSIFIER_SOURCE)
 # Сплиты, на которых считается AUROC: dev — там подбирают порог и выбирают источник, test — проверка.
 AUROC_SPLITS = ("dev", "test")
 
@@ -58,6 +62,7 @@ PER_QUESTION_FIELDS = (
     "answer",
     "abstained",
     "confidence",
+    "abstain_score",  # P(нет ответа) от классификатора отказа; None, если abstention.method: threshold
     "confidence_by_source",  # уверенность по каждому доступному источнику: {"bm25": 12.3, "dense": 0.61}
     "retrieved",
     "flags",
@@ -92,6 +97,8 @@ class ExperimentResult:
 
     ``score_source`` — шкала уверенности, к которой относится ``threshold``
     (``rerank`` / ``dense`` / ``bm25``): порог 20.5 по BM25 и 0.5 по косинусу несравнимы.
+    У классификатора отказа — ``classifier:<тип модели>``, а ``threshold`` — порог модели по
+    P(нет ответа) (отказ, если p ≥ порога), взятый из файла модели, а не подобранный в прогоне.
 
     ``provenance`` — отпечаток данных прогона (хэши корпуса и эталона, см.
     ``runner.data_fingerprint``): конфиг хранит только пути, а не содержимое файлов.

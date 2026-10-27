@@ -227,12 +227,18 @@ class AskResponse(BaseModel):
     answer: str
     abstained: bool = Field(description="True — система отказалась отвечать («в базе нет ответа»)")
     confidence: float | None = Field(description="Уверенность поиска, по ней принимается решение об отказе")
+    abstain_score: float | None = Field(
+        default=None,
+        description="Вероятность «в базе нет ответа» от классификатора отказа; null — классификатор не используется",
+    )
     citations: list[CitationOut]
     contexts: list[ContextOut]
     timings_ms: dict[str, float] = Field(
         description="Время этапов: retrieve_ms, rerank_ms, generate_ms, total_ms"
     )
-    flags: list[str] = Field(description="Служебные пометки: low_confidence, prompt_injection:<chunk_id>, …")
+    flags: list[str] = Field(
+        description="Служебные пометки: low_confidence, abstain_classifier, prompt_injection:<chunk_id>, …"
+    )
 
 
 def _finite_or_none(value: float | None) -> float | None:
@@ -277,6 +283,7 @@ def build_ask_response(answer: Answer, score_source: str | None = None) -> AskRe
         answer=answer.text,
         abstained=answer.abstained,
         confidence=_finite_or_none(answer.confidence),
+        abstain_score=_finite_or_none(answer.abstain_score),
         citations=citations,
         contexts=contexts,
         timings_ms={name: round(float(ms), 3) for name, ms in answer.timings_ms.items()},
@@ -710,6 +717,9 @@ def _add_routes(app: FastAPI, state: ServiceState) -> None:
             "generator": _component_name(pipeline, "generator"),
             # Из какого score поиска берётся «уверенность» (rerank / dense / bm25).
             "score_source": getattr(pipeline, "score_source", None),
+            # Чем решается отказ сейчас: "threshold" или "classifier:<модель>" (без файла модели —
+            # откат на порог, и это должно быть видно здесь, а не только в логах).
+            "abstention_method": getattr(pipeline, "abstention_method", None),
             "abstention_threshold": _finite_or_none(getattr(pipeline, "threshold", None)),
         }
 

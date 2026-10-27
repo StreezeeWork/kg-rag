@@ -35,7 +35,7 @@ from typing import Any
 
 from kbrag.eval.dataset import QUESTION_TYPES
 from kbrag.eval.metrics import bootstrap_ci, paired_bootstrap_diff
-from kbrag.eval.results import BY_TYPE_KEY, SCORE_SOURCES, ExperimentResult
+from kbrag.eval.results import AUROC_SOURCES, BY_TYPE_KEY, ExperimentResult
 
 # (заголовок столбца, имя метрики) — порядок задаёт порядок столбцов.
 # Поиск: от порога отказа не зависит.
@@ -341,7 +341,7 @@ def _format_auroc(entry: dict | None) -> str:
 def _auroc_section(done: Sequence[ExperimentResult], split: str) -> list[str]:
     """Насколько каждый источник уверенности отделяет неотвечаемые вопросы — независимо от порога."""
     sources = [
-        source for source in SCORE_SOURCES if any(source in r.confidence_auroc.get(split, {}) for r in done)
+        source for source in AUROC_SOURCES if any(source in r.confidence_auroc.get(split, {}) for r in done)
     ]
     if not sources:
         return []
@@ -351,7 +351,9 @@ def _auroc_section(done: Sequence[ExperimentResult], split: str) -> list[str]:
         cells = []
         for source in sources:
             cell = _format_auroc(by_source.get(source))
-            cells.append(f"**{cell}**" if source == r.score_source and cell != MISSING else cell)
+            # score_source классификатора — «classifier:logreg»: жирным выделяем столбец classifier.
+            decides = source == (r.score_source or "").split(":")[0]
+            cells.append(f"**{cell}**" if decides and cell != MISSING else cell)
         rows.append([_escape_cell(r.name), *cells])
     return [
         "",
@@ -360,8 +362,10 @@ def _auroc_section(done: Sequence[ExperimentResult], split: str) -> list[str]:
         "AUROC — вероятность того, что у случайного отвечаемого вопроса уверенность выше, чем у случайного"
         " неотвечаемого: 1.0 — порог мог бы разделить их идеально, 0.5 — не лучше монетки. От порога не"
         " зависит. В скобках — 95% интервал (bootstrap); жирным — источник, по которому эксперимент"
-        " ставит порог. Неотвечаемых вопросов мало, поэтому интервалы широкие. Источник для порога"
-        " выбирают по dev (значения dev — в `results.json`, поле `confidence_auroc`).",
+        " ставит порог. Столбец classifier — классификатор отказа (уверенность = 1 − P(нет ответа)),"
+        " он есть только у экспериментов с `abstention.method: classifier`. Неотвечаемых вопросов мало,"
+        " поэтому интервалы широкие. Источник для порога выбирают по dev (значения dev — в"
+        " `results.json`, поле `confidence_auroc`).",
         "",
         *_table(["Эксперимент", *sources], rows),
     ]
