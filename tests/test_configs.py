@@ -17,6 +17,7 @@ from kbrag.config import AppConfig, load_config
 from kbrag.eval.runner import load_experiments
 from kbrag.ingest import load_corpus
 from kbrag.ingest.chunking import chunk_corpus, make_chunker
+from kbrag.pipeline import calibration_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = ROOT / "configs"
@@ -76,6 +77,27 @@ def test_chunking_steps_of_the_grid_really_change_the_chunks() -> None:
             f"{name_a} и {name_b} отличаются только секцией chunking, но индексируют одинаковые "
             "фрагменты: такой шаг абляции ничего не проверяет"
         )
+
+
+@pytest.mark.parametrize(
+    ("experiment", "service_config"),
+    [("hybrid_bm25_lsa_clf", "offline.yaml"), ("hybrid_bm25_e5_rerank_clf", "default.yaml")],
+)
+def test_classifier_experiments_match_the_config_their_model_is_trained_for(
+    experiment: str, service_config: str
+) -> None:
+    """Модель отказа обучают командой ``kbrag train-abstention --config configs/<service_config>``.
+
+    Сервис и оценка применяют её, только если отпечаток поиска совпадает. Расхождение хотя бы
+    в одном поле (например, незакреплённая ревизия модели) сделало бы шаг сетки неисполнимым.
+    """
+    cfg = experiment_configs()[experiment]
+    service = load_config(CONFIGS / service_config)
+    assert cfg.abstention.method == "classifier"
+    assert cfg.abstention.model_path == service.abstention.model_path
+    assert calibration_fingerprint(cfg) == calibration_fingerprint(service)
+    # Боевые конфиги пока остаются на пороге: переключение — решение по итогам эксперимента на dev.
+    assert service.abstention.method == "threshold"
 
 
 @pytest.mark.parametrize("name", ["default.yaml", "offline.yaml"])

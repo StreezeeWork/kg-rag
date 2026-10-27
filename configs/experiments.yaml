@@ -21,7 +21,8 @@
 #   bm25_recursive → lsa_dense (тип поиска) → hybrid_bm25_lsa (гибрид) → *_weighted (слияние);
 #   lsa_dense → e5_dense и hybrid_bm25_lsa → hybrid_bm25_e5 (модель эмбеддингов);
 #   hybrid_bm25_e5 → *_rerank (реранкер) → *_chunk100 → *_chunk60 (размер фрагмента: 180 → 100 → 60);
-#   hybrid_bm25_e5_rerank → bge_m3_hybrid_rerank (размер моделей).
+#   hybrid_bm25_e5_rerank → bge_m3_hybrid_rerank (размер моделей);
+#   hybrid_bm25_lsa → hybrid_bm25_lsa_clf и hybrid_bm25_e5_rerank → *_clf (отказ: порог → классификатор).
 #
 # Два эксперимента совпадают с «боевыми» конфигами по настройкам нарезки и поиска:
 #   hybrid_bm25_lsa       = configs/offline.yaml,
@@ -91,6 +92,20 @@ experiments:
         dense: {embedder: lsa}
         hybrid: {fusion: weighted, weights: {bm25: 0.6, dense: 0.4}}
 
+  # --- Классификатор отказа вместо порога (то же «как отвечать», другое «когда отказаться») ---
+  # Модель обучается отдельно: `kbrag build-train`, затем `kbrag train-abstention --config configs/offline.yaml`.
+  # Нет файла модели — эксперимент пропускается (skipped) с подсказкой. Поиск у шага тот же, что у
+  # hybrid_bm25_lsa, и совпадает с configs/offline.yaml до отпечатка (иначе модель не применится —
+  # это проверяет tests/test_configs.py). Сравнивайте Abstention F1, FAR и AUROC (столбец classifier
+  # в таблице AUROC) с hybrid_bm25_lsa; метрики поиска у пары одинаковы по построению.
+  - name: hybrid_bm25_lsa_clf
+    description: "Гипотеза: классификатор отказа (logreg/CatBoost на признаках выдачи) отделяет вопросы без ответа лучше порога по одному dense-score при той же выдаче, что hybrid_bm25_lsa"
+    requires_neural: false
+    heavy: false
+    overrides:
+      retrieval: {mode: hybrid, dense: {embedder: lsa}, hybrid: {fusion: rrf}}
+      abstention: {method: classifier, model_path: reports/abstention_offline.json}
+
   # --- Нейросетевые эмбеддинги и реранкер ----------------------------------------
   - name: e5_dense
     description: "Гипотеза: многоязычные нейросетевые эмбеддинги e5 заметно лучше LSA на перефразах"
@@ -123,6 +138,30 @@ experiments:
         dense: {embedder: sentence-transformers, model: intfloat/multilingual-e5-small}
         hybrid: {fusion: rrf}
       rerank: {enabled: true, model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
+
+  # Модель для этого шага обучается на configs/default.yaml (`kbrag train-abstention --config configs/default.yaml`),
+  # поэтому ревизии моделей здесь закреплены, как в default.yaml: без них отпечаток поиска отличался бы,
+  # и модель не применилась бы. Пара для сравнения — hybrid_bm25_e5_rerank (ревизии там не закреплены,
+  # но в кэше лежат те же снапшоты; порог там — по rerank, у default.yaml — по dense).
+  - name: hybrid_bm25_e5_rerank_clf
+    description: "Гипотеза: классификатор отказа поверх e5 + реранкера ловит вопросы без ответа лучше порога по одной уверенности"
+    requires_neural: true
+    heavy: false
+    overrides:
+      retrieval:
+        mode: hybrid
+        top_k: 5
+        candidates_k: 30
+        dense:
+          embedder: sentence-transformers
+          model: intfloat/multilingual-e5-small
+          revision: 614241f622f53c4eeff9890bdc4f31cfecc418b3
+        hybrid: {fusion: rrf}
+      rerank:
+        enabled: true
+        model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+        revision: 1427fd652930e4ba29e8149678df786c240d8825
+      abstention: {method: classifier, model_path: reports/abstention_default.json}
 
   # --- Размер фрагмента при лучшей схеме поиска ----------------------------------
   # Самый длинный раздел корпуса — 166 слов. RecursiveChunker режет раздел, только если он

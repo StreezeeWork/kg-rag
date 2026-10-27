@@ -13,6 +13,7 @@
 
 corpus_dir: data/corpus            # откуда читаем markdown-документы базы знаний
 gold_path: data/eval/gold.jsonl    # эталонные вопросы для оценки (собирает `kbrag build-gold`)
+train_path: data/eval/train.jsonl  # обучающие вопросы классификатора отказа (`kbrag build-train`), не пересекаются с gold
 cache_dir: .cache                  # кэш эмбеддингов пассажей: повторный старт не пересчитывает индекс
 reports_dir: reports               # сюда пишутся отчёты оценки
 
@@ -69,6 +70,8 @@ generation:
 
 abstention:
   enabled: true         # отказываемся отвечать, если поиск не уверен: выдумка хуже честного «не знаю»
+  method: threshold     # threshold — порог по уверенности; classifier — модель отказа (`kbrag train-abstention
+                        # --config configs/default.yaml`). Переключать — по итогам эксперимента hybrid_bm25_e5_rerank_clf на dev
   threshold: auto       # порог подбирается на dev; сервису его сохраняет `make eval CONFIG=configs/default.yaml NAME=neural`
                         # (то же: `kbrag eval --config configs/default.yaml --save-calibration`; без флага файла не будет,
                         # и сервис будет отвечать без отказов по порогу)
@@ -76,6 +79,7 @@ abstention:
                         # confidence_auroc в results.json): dense 0.79 > bm25 0.77 > rerank 0.74 — реранкер лучше
                         # упорядочивает фрагменты, но его score хуже отделяет вопросы без ответа. По test не выбираем.
   calibration_path: reports/calibration.json  # сервис читает порог отсюда, если конфиг поиска не менялся
+  model_path: reports/abstention_default.json  # модель отказа для method: classifier (свой файл на каждый конфиг поиска)
 
 guardrails:
   enabled: true         # текст документов — данные, а не инструкции: ловим prompt injection во фрагментах

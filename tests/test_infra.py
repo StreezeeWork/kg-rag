@@ -77,6 +77,16 @@ def test_calibration_is_committed_but_scratch_reports_are_not() -> None:
     assert git_ignores("reports/_tmp/results.json")
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["reports/abstention_offline.json", "reports/abstention_default.json", "reports/abstention_default.cbm"],
+)
+def test_abstention_model_reaches_git_and_image(path: str) -> None:
+    # Модель отказа сервис читает так же, как калибровку: свежий клон и Docker-образ должны её получить.
+    assert not git_ignores(path)
+    assert {"!reports/abstention*.json", "!reports/abstention*.cbm"} <= dockerignore_patterns()
+
+
 def test_committed_calibration_matches_offline_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # Отпечаток в файле должен совпадать с текущими настройками поиска offline.yaml, иначе сервис
     # порог проигнорирует. Упал тест — запустите `make eval` и закоммитьте файл калибровки.

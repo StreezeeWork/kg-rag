@@ -10,6 +10,7 @@
 
 corpus_dir: data/corpus            # откуда читаем markdown-документы базы знаний
 gold_path: data/eval/gold.jsonl    # эталонные вопросы для оценки (собирает `kbrag build-gold`)
+train_path: data/eval/train.jsonl  # обучающие вопросы классификатора отказа (`kbrag build-train`), не пересекаются с gold
 cache_dir: .cache                  # кэш эмбеддингов и моделей; можно безопасно удалить
 reports_dir: reports               # сюда пишутся отчёты оценки (results.json, leaderboard.md)
 
@@ -51,12 +52,17 @@ generation:
 
 abstention:
   enabled: true         # лучше честно сказать «нет ответа», чем уверенно выдумать
+  method: threshold     # threshold — порог по одной уверенности поиска; classifier — модель отказа на ~20 признаках
+                        # выдачи (обучает `kbrag train-abstention --config configs/offline.yaml`). Переключать — только
+                        # если эксперимент hybrid_bm25_lsa_clf (configs/experiments.yaml) лучше порога по метрикам dev
   threshold: auto       # порог подбирается на dev при `kbrag eval`, а не «на глаз»; в файл для сервиса
                         # его пишет только `kbrag eval --config configs/offline.yaml --save-calibration`
   score_source: auto    # без реранкера уверенность берётся из dense-score (он сравним между вопросами)
   calibration_path: reports/calibration_offline.json  # отдельный файл: калибровка зависит от конфига поиска.
                         # Файл лежит в git (его читают свежий клон и Docker-образ). После правки поиска, корпуса или
                         # эталона обновите его (`make eval`) и закоммитьте: CI сверяет его с пересчитанным порогом
+  model_path: reports/abstention_offline.json  # модель отказа для method: classifier (пишет `kbrag train-abstention`);
+                        # как и калибровка, привязана к настройкам поиска и корпусу и лежит в git
 
 guardrails:
   enabled: true         # документы — данные, а не команды: ищем во фрагментах попытки prompt injection

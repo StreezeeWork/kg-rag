@@ -25,6 +25,10 @@ dist/
 reports/*
 !reports/.gitkeep
 !reports/calibration*.json
+# Модель классификатора отказа (abstention.method: classifier) сервис тоже читает из reports/ —
+# по той же причине она в git: JSON-метаданные (+ веса logreg) и деревья CatBoost (.cbm).
+!reports/abstention*.json
+!reports/abstention*.cbm
 
 # Секреты и локальные настройки: .env и любые варианты (.env.local, .env.prod, …).
 # Шаблон .env.example без секретов — в git.
