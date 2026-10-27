@@ -2,12 +2,14 @@
 
 Команды:
 
-    validate-data   проверить корпус и эталонный набор, показать статистику
-    build-gold      собрать data/eval/gold.jsonl из частей data/eval/parts/*.jsonl
-    ask             задать вопрос из терминала
-    eval            оценить один конфиг → reports/<name>/ (+ quality gate --fail-under)
-    grid            прогнать сетку экспериментов → reports/grid/
-    serve           запустить HTTP-сервис с веб-страницей
+    validate-data     проверить корпус и эталонный набор, показать статистику
+    build-gold        собрать data/eval/gold.jsonl из частей data/eval/parts/*.jsonl
+    build-train       собрать data/eval/train.jsonl (вопросы для классификатора отказа) из train_parts/
+    train-abstention  обучить классификатор отказа → abstention.model_path (reports/abstention_*.json)
+    ask               задать вопрос из терминала
+    eval              оценить один конфиг → reports/<name>/ (+ quality gate --fail-under)
+    grid              прогнать сетку экспериментов → reports/grid/
+    serve             запустить HTTP-сервис с веб-страницей
 
 Коды возврата (на них опираются CI и Makefile):
 
@@ -29,6 +31,7 @@ import os
 import sys
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -39,10 +42,12 @@ from kbrag.config import AppConfig, load_config
 from kbrag.eval.dataset import (
     QUESTION_TYPES,
     SPLITS,
+    TRAIN_SPLIT,
     GoldItem,
     assign_splits,
     load_gold,
     save_gold,
+    train_gold_conflicts,
     validate_gold,
 )
 from kbrag.eval.report import format_number, safe_file_name, write_report
@@ -59,6 +64,8 @@ EXIT_INTERRUPTED = 130  # общепринятый код «прервано п�
 
 DEFAULT_PARTS_DIR = "data/eval/parts"
 DEFAULT_GOLD_OUT = "data/eval/gold.jsonl"
+DEFAULT_TRAIN_PARTS_DIR = "data/eval/train_parts"
+DEFAULT_TRAIN_OUT = "data/eval/train.jsonl"
 DEFAULT_EXPERIMENTS = "configs/experiments.yaml"
 DEFAULT_GRID_OUT = "reports/grid"
 
@@ -160,7 +167,9 @@ def _format_counter(counter: Counter) -> str:
     return ", ".join(f"{key} {count}" for key, count in items) or "—"
 
 
-def _print_gold_stats(gold: Sequence[GoldItem]) -> None:
+def _print_gold_stats(
+    gold: Sequence[GoldItem], splits: Sequence[str] = SPLITS, title: str = "Эталонный набор"
+) -> None:
     """Таблица «тип вопроса × split»: сразу видно, хватает ли dev-вопросов каждого типа."""
     by_type_and_split = Counter((item.qtype, item.split) for item in gold)
     by_type = Counter(item.qtype for item in gold)
@@ -168,12 +177,12 @@ def _print_gold_stats(gold: Sequence[GoldItem]) -> None:
     # Сначала известные типы в каноническом порядке, затем неизвестные (их потом отметит validate_gold).
     types = [t for t in QUESTION_TYPES if t in by_type] + sorted(set(by_type) - set(QUESTION_TYPES))
 
-    print(f"Эталонный набор: {len(gold)} вопросов")
-    print(f"  {'тип':<14}" + "".join(f"{split:>7}" for split in SPLITS) + f"{'всего':>8}")
+    print(f"{title}: {len(gold)} вопросов")
+    print(f"  {'тип':<14}" + "".join(f"{split:>7}" for split in splits) + f"{'всего':>8}")
     for qtype in types:
-        cells = "".join(f"{by_type_and_split[(qtype, split)]:>7}" for split in SPLITS)
+        cells = "".join(f"{by_type_and_split[(qtype, split)]:>7}" for split in splits)
         print(f"  {qtype:<14}{cells}{by_type[qtype]:>8}")
-    totals = "".join(f"{by_split[split]:>7}" for split in SPLITS)
+    totals = "".join(f"{by_split[split]:>7}" for split in splits)
     print(f"  {'итого':<14}{totals}{len(gold):>8}")
 
 
@@ -256,13 +265,13 @@ def cmd_build_gold(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _check_gold_file(path: Path, expected: list[GoldItem]) -> int:
-    """Совпадает ли файл на диске с тем, что собрал бы build-gold. Нужен в CI.
+def _check_gold_file(path: Path, expected: list[GoldItem], command: str = "build-gold") -> int:
+    """Совпадает ли файл на диске с тем, что собрал бы ``kbrag <command>``. Нужен в CI.
 
     Сравниваем разобранные записи, а не байты: git на Windows (autocrlf) может поменять
     переводы строк в файле, и побайтовое сравнение ложно сообщало бы об устаревшем файле.
     """
-    hint = "запустите `kbrag build-gold` и закоммитьте результат"
+    hint = f"запустите `kbrag {command}` и закоммитьте результат"
     if not path.is_file():
         _print_error(f"файл {path} не найден — {hint}")
         return EXIT_ERROR
@@ -291,6 +300,141 @@ def _check_gold_file(path: Path, expected: list[GoldItem]) -> int:
         details.append("отличается порядок вопросов")
     _print_error(f"файл {path} устарел ({'; '.join(details)}) — {hint}")
     return EXIT_ERROR
+
+
+# ---------------------------------------------------------------------------
+# build-train
+# ---------------------------------------------------------------------------
+
+
+def cmd_build_train(args: argparse.Namespace) -> int:
+    """Склеивает части обучающего набора, ставит split=train, проверяет и пишет (или сверяет с --check).
+
+    Кроме обычной проверки разметки (как у эталона) ищет пересечения с эталоном: общий id
+    или почти тот же вопрос (Jaccard стемов ≥ 0.7). Такой вопрос — утечка: модель училась бы
+    на перефразе test-вопроса, и её качество на test было бы завышено.
+    """
+    parts_dir = Path(args.parts)
+    part_files = sorted(parts_dir.glob("*.jsonl"))
+    if not part_files:
+        _print_error(f"в каталоге {parts_dir} нет файлов *.jsonl")
+        return EXIT_ERROR
+    items = [replace(item, split=TRAIN_SPLIT) for path in part_files for item in load_gold(path)]
+
+    cfg = _load_cfg(args.config)
+    gold_path = Path(cfg.gold_path)
+    if not gold_path.is_file():
+        _print_error(
+            f"эталон {gold_path} не найден: без него нельзя проверить пересечения — `kbrag build-gold`"
+        )
+        return EXIT_ERROR
+    errors = validate_gold(items, load_corpus(cfg.corpus_dir), splits=(TRAIN_SPLIT,))
+    conflicts = train_gold_conflicts(items, load_gold(gold_path))
+    if errors:
+        _print_errors("Ошибки в частях обучающего набора", errors)
+    if conflicts:
+        _print_errors(f"Пересечения обучающего набора с эталоном {gold_path}", conflicts)
+    if errors or conflicts:
+        return EXIT_ERROR
+
+    out = Path(args.out)
+    if args.check:
+        return _check_gold_file(out, items, command="build-train")
+    save_gold(items, out)
+    print(f"Собрано {len(items)} обучающих вопросов из {len(part_files)} файлов → {out}")
+    _print_gold_stats(items, splits=(TRAIN_SPLIT,), title="Обучающий набор")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# train-abstention
+# ---------------------------------------------------------------------------
+
+
+def cmd_train_abstention(args: argparse.Namespace) -> int:
+    """Обучает классификатор отказа для конфига и печатает CV, метрики dev и важные признаки."""
+    cfg = _load_cfg(args.config, needs_index=True)
+    if not (args.out or cfg.abstention.model_path):
+        _print_error("не задан путь к модели: abstention.model_path в конфиге или --out")
+        return EXIT_ERROR
+    for path, command in ((cfg.train_path, "build-train"), (cfg.gold_path, "build-gold")):
+        if not Path(path).is_file():
+            _print_error(f"файл {path} не найден — соберите его командой `kbrag {command}`")
+            return EXIT_ERROR
+
+    from kbrag.abstention.train import train_abstention
+
+    report = train_abstention(cfg, model=args.model, out=args.out)
+    _print_train_report(report)
+    if report.model_path is None:
+        _print_error(
+            "порог решения на dev не подобран (модель не лучше «никогда не отказываться») — "
+            "файл модели не записан"
+        )
+        return EXIT_ERROR
+    print(f"Модель сохранена: {report.model_path}")
+    return EXIT_OK
+
+
+def _print_train_report(report: Any) -> None:
+    """Печать ``abstention.train.TrainReport``: CV → выбор → dev → признаки."""
+    print(
+        f"Вопросов в train: {report.n_train} (без ответа {report.n_train_unanswerable}); "
+        f"в dev для порога: {report.n_dev} (без ответа {report.n_dev_unanswerable}); test не используется"
+    )
+    n_folds = report.cv[0]["n_folds"] if report.cv else 0
+    print(f"\nКросс-валидация на train ({n_folds} фолдов, mean ± std):")
+    print(f"  {'кандидат':<26}{'ROC-AUC':>17}{'PR-AUC':>17}")
+    for row in report.cv:
+        mark = "  <- выбран" if row["name"] == report.chosen else ""
+        print(
+            f"  {row['name']:<26}{row['roc_auc_mean']:>9.3f} ± {row['roc_auc_std']:.3f}"
+            f"{row['pr_auc_mean']:>9.3f} ± {row['pr_auc_std']:.3f}{mark}"
+        )
+    print(f"Выбрана модель: {report.chosen} (лучшая средняя ROC-AUC на CV; ничья — более простая)")
+    if not report.beats_baseline:
+        print(
+            "Внимание: модель не обгоняет бейзлайн (нынешний порог по уверенности) — "
+            "разумно оставить abstention.method: threshold."
+        )
+
+    threshold = report.decision_threshold
+    print(
+        "\nПорог решения (подобран на dev по balanced accuracy): "
+        + ("не подобран" if threshold is None else f"отказ, если p ≥ {threshold:.4f}")
+    )
+    clf, base = report.dev["classifier"], report.dev["baseline"]
+    print(
+        "Dev (метрики решения оптимистичны: порог подобран на тех же вопросах; честно — test в kbrag eval):"
+    )
+    print(f"  {'метрика':<24}{'классификатор':>22}{'бейзлайн':>22}")
+    print(f"  {'AUROC [95% ДИ]':<24}{_format_auroc_cell(clf):>22}{_format_auroc_cell(base):>22}")
+    for key, title in (
+        ("balanced_accuracy", "balanced accuracy"),
+        ("abstain_precision", "abstain precision"),
+        ("abstain_recall", "abstain recall"),
+        ("abstain_f1", "abstain F1"),
+        ("false_abstention_rate", "FAR"),
+    ):
+        print(f"  {title:<24}{format_number(clf.get(key)):>22}{format_number(base.get(key)):>22}")
+    print(
+        f"  {'порог':<24}{format_number(clf.get('threshold')):>22}{format_number(base.get('threshold')):>22}"
+    )
+    print(f"  (бейзлайн — {report.baseline_feature}: уверенность нынешнего порогового метода)")
+
+    kind = "коэффициент (на стандартизованных признаках; + толкает к отказу)"
+    if report.importance_kind != "coef":
+        kind = "средний |SHAP| (на сколько признак в среднем сдвигает логит)"
+    print(f"\nТоп признаков — {kind}:")
+    for name, value in report.importance[:8]:
+        print(f"  {name:<22}{value:>+10.3f}")
+
+
+def _format_auroc_cell(entry: dict) -> str:
+    value, interval = entry.get("auroc"), entry.get("auroc_ci95")
+    if value is None:
+        return "—"
+    return f"{value:.3f} [{interval[0]:.2f}; {interval[1]:.2f}]" if interval else f"{value:.3f}"
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +755,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--check", action="store_true", help="ничего не писать, только проверить, что файл актуален (для CI)"
     )
     p.set_defaults(handler=cmd_build_gold)
+
+    p = commands.add_parser(
+        "build-train",
+        parents=[with_config],
+        help="собрать train.jsonl для классификатора отказа и проверить, что он не повторяет эталон",
+    )
+    p.add_argument(
+        "--parts",
+        default=DEFAULT_TRAIN_PARTS_DIR,
+        help=f"каталог с частями *.jsonl (по умолчанию {DEFAULT_TRAIN_PARTS_DIR})",
+    )
+    p.add_argument(
+        "--out", default=DEFAULT_TRAIN_OUT, help=f"куда записать набор (по умолчанию {DEFAULT_TRAIN_OUT})"
+    )
+    p.add_argument(
+        "--check", action="store_true", help="ничего не писать, только проверить, что файл актуален (для CI)"
+    )
+    p.set_defaults(handler=cmd_build_train)
+
+    p = commands.add_parser(
+        "train-abstention",
+        parents=[with_config],
+        help="обучить классификатор отказа: CV на train, порог на dev → abstention.model_path",
+    )
+    p.add_argument(
+        "--model",
+        choices=["auto", "logreg", "catboost"],
+        default="auto",
+        help="какие модели сравнивать: auto — logreg и catboost (по умолчанию), или только одну",
+    )
+    p.add_argument("--out", default=None, help="куда сохранить модель (по умолчанию abstention.model_path)")
+    p.set_defaults(handler=cmd_train_abstention)
 
     p = commands.add_parser("ask", parents=[with_config], help="задать вопрос из терминала")
     p.add_argument("question", help="текст вопроса (в кавычках)")

@@ -31,18 +31,16 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from kbrag.config import AppConfig, load_config
-from kbrag.eval.dataset import GoldItem, evidence_spans, load_gold, validate_gold
+from kbrag.eval.dataset import GoldItem, evidence_spans, items_fingerprint, load_gold, validate_gold
 from kbrag.eval.metrics import (
     abstention_report,
     auroc,
@@ -174,16 +172,10 @@ def data_fingerprint(docs: Sequence[Document], gold: Sequence[GoldItem]) -> dict
     """
     return {
         "corpus_sha256": corpus_fingerprint(list(docs)),
-        "gold_sha256": _short_sha256([asdict(item) for item in gold]),
+        "gold_sha256": items_fingerprint(gold),
         "n_docs": len(docs),
         "n_gold": len(gold),
     }
-
-
-def _short_sha256(obj: Any) -> str:
-    # sort_keys — чтобы порядок ключей словарей не менял хэш; default=str — для дат из шапок документов.
-    payload = json.dumps(obj, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 LLM_ERROR_FLAG = "llm_error"  # флаг вопроса, на котором LLM не ответила (таймаут, 5xx и т.п.)

@@ -16,11 +16,11 @@ import json
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from kbrag.text import find_span
+from kbrag.text import analyze, find_span, normalize
 from kbrag.types import Chunk, Document
 
 QUESTION_TYPES = (
@@ -34,6 +34,12 @@ QUESTION_TYPES = (
     "unanswerable",
 )
 SPLITS = ("dev", "test")
+# Обучающие вопросы классификатора отказа живут в отдельном файле (data/eval/train.jsonl) со split="train":
+# в gold.jsonl их нет, чтобы ни одна команда оценки не могла случайно на них «подсмотреть».
+TRAIN_SPLIT = "train"
+# Вопросы train и gold с такой (или большей) похожестью по Jaccard стемов считаются дубликатами:
+# модель, обученная на почти том же вопросе, что лежит в test, показала бы завышенное качество.
+NEAR_DUPLICATE_JACCARD = 0.7
 
 # Положение цитаты в корпусе: (doc_id, start, end) — смещения в Document.text.
 Span = tuple[str, int, int]
@@ -160,10 +166,14 @@ def save_gold(items: Sequence[GoldItem], path: str | Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def validate_gold(items: Sequence[GoldItem], docs: Sequence[Document]) -> list[str]:
+def validate_gold(
+    items: Sequence[GoldItem], docs: Sequence[Document], splits: Sequence[str] = SPLITS
+) -> list[str]:
     """Возвращает список ошибок разметки (пустой список — всё хорошо).
 
     Не бросаем исключение на первой ошибке: удобнее увидеть и исправить все сразу.
+    ``splits`` — допустимые значения ``split``: для эталона ``dev``/``test``, для обучающего набора
+    классификатора отказа — ``(TRAIN_SPLIT,)``. Остальные правила разметки у них общие.
     """
     docs_by_id = {doc.doc_id: doc for doc in docs}
     errors: list[str] = []
@@ -179,8 +189,8 @@ def validate_gold(items: Sequence[GoldItem], docs: Sequence[Document]) -> list[s
             errors.append(f"{where}: пустой вопрос")
         if item.qtype not in QUESTION_TYPES:
             errors.append(f"{where}: неизвестный type {item.qtype!r}")
-        if item.split not in SPLITS:
-            errors.append(f"{where}: неизвестный split {item.split!r} (ожидается dev или test)")
+        if item.split not in splits:
+            errors.append(f"{where}: неизвестный split {item.split!r} (ожидается {' или '.join(splits)})")
 
         if item.answerable:
             if not item.evidence:
@@ -199,6 +209,78 @@ def validate_gold(items: Sequence[GoldItem], docs: Sequence[Document]) -> list[s
                 errors.append(f"{where}: неизвестный doc_id {ev.doc_id!r}")
             elif find_span(doc.text, ev.quote) is None:
                 errors.append(f"{where}: цитата не найдена в документе {ev.doc_id!r}: {ev.quote[:60]!r}")
+    return errors
+
+
+def items_fingerprint(items: Sequence[GoldItem]) -> str:
+    """Короткий sha256 содержимого набора вопросов: по нему видно, на каких данных получен результат.
+
+    Тот же рецепт, что у ``gold_sha256`` в ``results.json`` (``runner.data_fingerprint``), поэтому
+    хэши эталона и обучающего набора считаются одинаково. ``sort_keys`` — порядок ключей не важен.
+    """
+    payload = json.dumps([asdict(item) for item in items], ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Обучающий набор: защита от утечки в эталон
+# ---------------------------------------------------------------------------
+
+
+def question_stems(question: str) -> frozenset[str]:
+    """«О чём» вопрос без учёта формы слов: множество стемов ``text.analyze`` без стоп-слов."""
+    return frozenset(analyze(question))
+
+
+def find_near_duplicates(
+    items: Sequence[GoldItem], reference: Sequence[GoldItem], min_jaccard: float = NEAR_DUPLICATE_JACCARD
+) -> list[tuple[str, str, float]]:
+    """Пары ``(qid из items, qid из reference, похожесть)``, слишком похожие для разных наборов.
+
+    Похожесть — коэффициент Jaccard множеств стемов: ``|A ∩ B| / |A ∪ B|``. Стемы, а не слова, —
+    чтобы «отпуск» и «отпуска» совпадали; порядок слов не важен. Точное совпадение текста
+    (после ``text.normalize``) — всегда 1.0, даже если в вопросе одни стоп-слова.
+
+    Почему порог 0.7: вопрос из пяти значимых слов с одним добавленным словом даёт 5/6 ≈ 0.83,
+    с одной заменой в длинном вопросе — 6/8 = 0.75, то есть это перефраз того же вопроса.
+    А разные вопросы об одном документе («Сколько дней длится отпуск?» и «За сколько дней подавать
+    заявление на отпуск?») дают около 0.5 и дубликатами не считаются. Простое лексическое сравнение
+    не ловит перефраз синонимами — это известное ограничение; ловит главное: копии и мелкие правки.
+    """
+    reference_stems = [(ref.qid, normalize(ref.question), question_stems(ref.question)) for ref in reference]
+    pairs: list[tuple[str, str, float]] = []
+    for item in items:
+        text, stems = normalize(item.question), question_stems(item.question)
+        for ref_qid, ref_text, ref_stems in reference_stems:
+            if text == ref_text:
+                similarity = 1.0
+            elif stems and ref_stems:
+                similarity = len(stems & ref_stems) / len(stems | ref_stems)
+            else:
+                continue
+            if similarity >= min_jaccard:
+                pairs.append((item.qid, ref_qid, similarity))
+    return pairs
+
+
+def train_gold_conflicts(
+    train: Sequence[GoldItem], gold: Sequence[GoldItem], min_jaccard: float = NEAR_DUPLICATE_JACCARD
+) -> list[str]:
+    """Ошибки «обучающий вопрос пересекается с эталоном»: общий id или почти тот же вопрос.
+
+    Сравниваем со ВСЕМ эталоном, включая test: обучиться на перефразе test-вопроса — та же утечка,
+    что подобрать порог на test. Пустой список — пересечений нет.
+    """
+    gold_by_id = {item.qid: item for item in gold}
+    errors = [
+        f"{item.qid}: этот id уже есть в эталоне (gold.jsonl)" for item in train if item.qid in gold_by_id
+    ]
+    train_by_id = {item.qid: item for item in train}
+    for train_qid, gold_qid, similarity in find_near_duplicates(train, gold, min_jaccard):
+        errors.append(
+            f"{train_qid} ≈ {gold_qid} (Jaccard {similarity:.2f}): "
+            f"{train_by_id[train_qid].question[:60]!r} ~ {gold_by_id[gold_qid].question[:60]!r}"
+        )
     return errors
 
 
