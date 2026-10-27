@@ -16,7 +16,11 @@ data/corpus/**/*.md ──loader──► Document ──chunker──► Chunk 
        ──► confidence ≥ threshold? ──нет──► отказ («В базе знаний нет ответа…»), фрагменты с флагами
                                    └─да──► лимит контекста ──► generator(копии) ──► Answer(+citations)
 data/eval/gold.jsonl ──► eval.runner (dev: калибровка порога, test: отчёт) ──► reports/
+data/eval/train.jsonl ──► abstention.train (CV на train, порог на dev) ──► reports/abstention_*.json
 ```
+
+При `abstention.method: classifier` вместо `confidence ≥ threshold` решает модель отказа: отвечаем,
+если P(нет ответа) < порога модели (см. раздел «Классификатор отказа» в конце).
 
 ## Общие правила
 
@@ -330,3 +334,90 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
 - Образ сервиса не содержит `data/eval` (эталон нужен только `kbrag eval`).
 - Тесты: autouse-фикстура в `tests/conftest.py` убирает из окружения все `KBRAG_*`, кроме `KBRAG_RUN_NEURAL`;
   общие фабрики фрагментов — фикстуры `make_context(doc_id, needle, …)` и `make_text_chunk(text, chunk_id)`.
+
+## Классификатор отказа (`kbrag.abstention`)
+
+Зачем: пороговый метод смотрит на одно число — лучший score одного источника. Классификатор
+решает «отвечать ли» по ~20 признакам выдачи сразу (форма выдачи, согласие поисковиков, покрытие
+слов вопроса). Это классическая табличная задача, и она решается классическими моделями.
+Боевые конфиги пока на `method: threshold`; переключение — по итогам экспериментов `*_clf` на dev.
+
+**Данные и утечки**
+- Обучающие вопросы — отдельный файл `data/eval/train.jsonl` (`AppConfig.train_path`), `split = "train"`
+  (`dataset.TRAIN_SPLIT`); в `gold.jsonl` их нет. Собирает `kbrag build-train [--parts data/eval/train_parts]
+  [--out data/eval/train.jsonl] [--check]`: склейка частей, `validate_gold(items, docs, splits=("train",))`
+  (у `validate_gold` параметр `splits`, по умолчанию `dev`/`test`) и `train_gold_conflicts(train, gold)` —
+  общий id или близкий вопрос (Jaccard множеств стемов `text.analyze` ≥ 0.7, `find_near_duplicates`;
+  точное совпадение после `normalize` — 1.0) со ВСЕМ эталоном → ошибка со списком пар.
+- train — обучение и выбор модели (CV); dev — только порог решения; test — только `kbrag eval`.
+  `fit_abstention(pipeline, train, dev)` получает списки явно и падает на чужом `split`;
+  `train_abstention` повторяет проверку пересечений (файл могли поправить руками).
+
+`abstention/features.py`
+- `FEATURE_NAMES` — фиксированный порядок столбцов (новые признаки — в конец), `FEATURE_DESCRIPTIONS` —
+  «почему признак может помочь». `extract_features(question, contexts) -> dict[str, float]`,
+  `features_to_matrix(rows, feature_names=FEATURE_NAMES)`.
+- Признаки — **только** из выдачи и текста вопроса: для `s ∈ {bm25, dense, rerank}` — `s_top1/top2/gap/mean`
+  по отсортированным `details[s]` (top1 = максимум, как `RAGPipeline.confidence`); `bm25_top1_per_term`
+  (BM25 растёт с длиной вопроса); `bm25_dense_same_top1`; `n_docs`; `archived_share`; `q_len` (уникальные стемы);
+  `q_cov_top1` (первый фрагмент выдачи, текст с заголовком) и `q_cov_topk`; `q_has_digits`. Недоступно — NaN
+  (нет источника, нет второго фрагмента, вопрос из стоп-слов); пустая выдача: `n_docs = 0`, `q_cov_topk = 0`.
+- `contexts` — первые `retrieval.top_k` фрагментов: сервис — `retrieve(top_k)`, оценка — `retrieved[:top_k]`;
+  паритет проверяет тест.
+
+`abstention/models.py`
+- `make_estimator("logreg", {"C": c})` — `SimpleImputer(median, keep_empty_features=True)` → `StandardScaler` →
+  `LogisticRegression(class_weight="balanced")`; `make_estimator("catboost", {"depth": d})` — `CATBOOST_DEFAULTS`
+  (400 итераций, lr 0.05, l2 5, `auto_class_weights="Balanced"`, `random_seed=0`, без файлов на диске).
+  catboost импортируется лениво (`ImportError` с «pip install -e .[classic]»).
+- `AbstentionModel`: `predict_proba(rows | matrix)` = P(в базе нет ответа), `predict_one`, `abstains(p)` ⇔
+  `p >= decision_threshold`; `metadata`: `fingerprint` (`calibration_fingerprint`), `corpus_sha256`, `train_sha256`,
+  `dev_sha256`, `baseline_feature`, `cv_report`, `dev_metrics`, `importance`, `created_at`, `versions`.
+- Файл без pickle: `save(path)` / `load(path)` — JSON (`format_version`, `model_type`, `feature_names`,
+  `decision_threshold`, `params`, метаданные); logreg — числа (`medians`, `means`, `scales`, `coef`, `intercept`)
+  и предсказание на numpy (`LogRegParams`, совпадает со sklearn до 1e-12); catboost — `.cbm` рядом
+  (`path.with_suffix(".cbm")`) и его sha256 в JSON. Строгий JSON (`allow_nan=False`).
+- `load_abstention_model(cfg, corpus_sha256=None)` — None с WARNING, если нет файла, файл битый, другой
+  `fingerprint`, другой `corpus_sha256` или другой `feature_names`; модель catboost без пакета → `ImportError`.
+
+`abstention/train.py`
+- `feature_table(pipeline, items) -> (rows, y, qids)`, `y = 1` — неотвечаемый.
+- `cross_validate(rows, y, seed=0, model="auto", baseline_feature=None)` — `RepeatedStratifiedKFold(5 × 3)`
+  (фолдов меньше, если неотвечаемых < 5), одни и те же фолды для всех кандидатов; ROC-AUC и PR-AUC
+  (average precision по классу «нет ответа») mean ± std. Кандидаты: бейзлайн `<score_source>_top1` со знаком
+  минус (NaN → выше всех, `baseline_scores`), logreg `C ∈ {0.1, 1, 10}`, catboost `depth ∈ {2, 3, 4}`
+  (`auto` без catboost — только logreg с предупреждением).
+- `choose_candidate` — лучшая средняя CV ROC-AUC среди обучаемых, ничья (1e-9) → более простая модель.
+  **Отступление от исходного плана:** бейзлайн в выборе не участвует — он и есть пороговый метод; если он лучше,
+  отчёт пишет «модель не обгоняет бейзлайн — оставьте `method: threshold`» (`TrainReport.beats_baseline`).
+- `tune_decision_threshold(p, y)` — `choose_threshold([1 − p], answerable)` → порог `1 − t`; отказ при `p ≥ 1 − t`
+  (порог — середина между значениями dev, на границе нет ни одного вопроса). Нет порога лучше balanced
+  accuracy 0.5 → None: модель не сохраняется, `kbrag train-abstention` возвращает код 1.
+- `evaluate_on_dev` — AUROC (+95% ДИ) классификатора (`1 − p`) и бейзлайна, balanced accuracy, abstention
+  precision/recall/F1, FAR при своём пороге у каждого (метрики решения на dev оптимистичны).
+- `feature_importance` — logreg: коэффициенты на стандартизованных признаках; catboost: средний |SHAP|
+  (`get_feature_importance(type="ShapValues")`, без столбца базового значения).
+- `train_abstention(cfg, model="auto", out=None, *, docs=None, train=None, gold=None, seed=0) -> TrainReport` —
+  признаки на пайплайне с `method: threshold` и без порога, сохранение в `out` или `abstention.model_path`.
+
+**config / pipeline / eval / api / cli**
+- `AbstentionConfig.method: Literal["threshold", "classifier"] = "threshold"`, `model_path: str | None = None`
+  (`offline.yaml` → `reports/abstention_offline.json`, `default.yaml` → `reports/abstention_default.json`);
+  `AppConfig.train_path = "data/eval/train.jsonl"`. Новые поля не входят в `calibration_fingerprint`.
+- `RAGPipeline(..., abstention_model=None)`; `from_config` при `enabled` и `method: classifier` грузит модель,
+  нет подходящей — WARNING и откат на порог (`resolve_threshold`), при рабочей модели `threshold = None`.
+  `abstain_score(question, contexts)`, `abstention_flag(confidence, abstain_score)` (классификатор — флаг
+  `abstain_classifier`, иначе порог — `low_confidence`; методы не складываются), свойство `abstention_method`
+  (`"threshold"` / `"classifier:<тип>"`). p считается по тем же фрагментам, что `confidence`, и всегда
+  (в том числе при `apply_threshold=False`); guardrails по-прежнему до решения. `Answer.abstain_score: float | None`.
+- runner: при `method: classifier` модель обязательна (`ValueError` «сначала kbrag train-abstention»), порог —
+  `decision_threshold` модели без переподбора; отказ = отказ генератора или `p ≥ порога`; `per_question` —
+  поле `abstain_score`, в `confidence_by_source` — `"classifier": 1 − p`; `score_source = "classifier:<тип>"`;
+  `confidence_auroc` и таблица AUROC leaderboard — источник `classifier` (`results.AUROC_SOURCES`).
+  `run_grid` пропускает (skipped) эксперимент-классификатор без файла модели; устаревшая модель — ошибка прогона.
+- `experiments.yaml`: `hybrid_bm25_lsa_clf` (= offline.yaml по отпечатку) и `hybrid_bm25_e5_rerank_clf`
+  (`requires_neural`, ревизии закреплены, = default.yaml по отпечатку; проверяет `tests/test_configs.py`).
+- API: `AskResponse.abstain_score` (null без классификатора), `/health` → `abstention_method`. CLI: `build-train`,
+  `train-abstention [--model auto|logreg|catboost] [--out]`; `eval --save-calibration` при `method: classifier` → код 1.
+- Инфраструктура: `reports/abstention*.json` и `reports/abstention*.cbm` — в git и в Docker-образе (как калибровка);
+  extra `classic = ["catboost>=1.2"]`, catboost также в `dev` (CI ставит `.[dev]`).
