@@ -63,6 +63,12 @@ jobs:
         # Если упало — запустите локально `make data` и закоммитьте gold.jsonl.
         run: kbrag build-gold --check
 
+      - name: Check training set is up to date
+        # То же для обучающего набора классификатора отказа: data/eval/train.jsonl должен совпадать
+        # со сборкой из train_parts/*.jsonl, проходить проверку разметки и не повторять вопросы
+        # эталона (общий id или Jaccard стемов ≥ 0.7 — утечка в test). Упало — `kbrag build-train`.
+        run: kbrag build-train --check
+
       - name: Validate corpus and gold set
         run: kbrag validate-data
 
