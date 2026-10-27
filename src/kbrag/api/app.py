@@ -82,6 +82,10 @@ QUESTION_INJECTION_FLAG = "question_injection"
 
 # Prometheus различает версии текстового формата по Content-Type.
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+# JSON по стандарту (RFC 8259) всегда в UTF-8, и браузеры это знают, но не все клиенты: Windows
+# PowerShell 5.1 (Invoke-RestMethod) без явного charset читает ответ как Latin-1 и показывает
+# кириллицу как «ÐÑÐ¾…». Явный charset ничего не ломает и чинит таких клиентов.
+JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 # Верхние границы бакетов гистограммы латентности, мс (+Inf добавляется автоматически).
 LATENCY_BUCKETS_MS: tuple[float, ...] = (50, 100, 250, 500, 1000, 2500, 5000)
 # Метка endpoint — только из этого списка. Если писать в метку любой путь из запроса,
@@ -435,7 +439,7 @@ def create_app(cfg: AppConfig | None = None, pipeline: RAGPipeline | None = None
     # самый внешний слой, поэтому они считают и отказы нижних слоёв (400 за чужой Host, 413).
     app.add_middleware(BodySizeLimitMiddleware, max_body_size=MAX_BODY_BYTES)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts_from_env())
-    _add_security_headers(app)
+    _add_common_headers(app)
     _add_metrics_middleware(app, state.metrics)
     _add_validation_error_handler(app)
     _add_routes(app, state)
@@ -517,16 +521,24 @@ def _index_csp() -> str:
     )
 
 
-def _add_security_headers(app: FastAPI) -> None:
-    """Защита в глубину для всех ответов: браузер не угадывает тип содержимого и не шлёт Referer."""
+def _add_common_headers(app: FastAPI) -> None:
+    """Общие заголовки для всех ответов.
+
+    * Защита в глубину: браузер не угадывает тип содержимого и не шлёт Referer.
+    * Явная кодировка JSON (см. ``JSON_CONTENT_TYPE``). Меняем её здесь, а не через
+      ``default_response_class``: ошибки 413/422/502/503 FastAPI и наши middleware отдают своими
+      ``JSONResponse``, а через этот слой проходят все ответы.
+    """
 
     @app.middleware("http")
-    async def security_headers(
+    async def common_headers(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
+        if response.headers.get("content-type") == "application/json":
+            response.headers["content-type"] = JSON_CONTENT_TYPE
         return response
 
 

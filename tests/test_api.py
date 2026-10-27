@@ -320,6 +320,26 @@ def test_allowed_hosts_come_from_environment(monkeypatch: pytest.MonkeyPatch) ->
         assert client.get("/health", headers={"host": "localhost"}).status_code == 400
 
 
+def test_every_json_response_declares_utf8(client: TestClient) -> None:
+    # Регрессия: без charset Windows PowerShell 5.1 показывал кириллицу в ответах как «ÐÑÐ¾…».
+    # Проверяем и успешные ответы, и ошибки — их FastAPI и middleware отдают своими JSONResponse.
+    responses = {
+        "ask": client.post("/ask", json={"question": "Сколько дней отпуска?"}),
+        "health": client.get("/health"),
+        "422": client.post("/ask", json={"question": ""}),
+        "413": client.post(
+            "/ask", content=b"x" * (MAX_BODY_BYTES + 1), headers={"Content-Type": "application/json"}
+        ),
+        # TestClient без `with` не запускает lifespan: пайплайн не построен → 503.
+        "503": TestClient(create_app(cfg=AppConfig())).post("/ask", json={"question": "Вопрос"}),
+    }
+    for name, response in responses.items():
+        assert response.headers["content-type"] == "application/json; charset=utf-8", name
+    # Не-JSON ответы сохраняют свои типы.
+    assert client.get("/metrics").headers["content-type"].startswith("text/plain; version=0.0.4")
+    assert client.get("/").headers["content-type"].startswith("text/html")
+
+
 def test_security_headers_and_page_csp(client: TestClient) -> None:
     import base64
     import hashlib
