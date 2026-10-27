@@ -106,12 +106,18 @@ class GenerationConfig(_Strict):
 
 class AbstentionConfig(_Strict):
     enabled: bool = True
+    # Как решаем об отказе: threshold — порог по одной «уверенности» поиска (ниже);
+    # classifier — обученная модель на признаках выдачи (kbrag.abstention, файл model_path).
+    # Нет файла модели или он от другого поиска — сервис откатывается на threshold.
+    method: Literal["threshold", "classifier"] = "threshold"
     # число → фиксированный порог; "auto" → калибруется на dev-выборке при оценке
     # (а в сервисе берётся из calibration_path, если файл есть); null → не отказываться по порогу
     threshold: float | Literal["auto"] | None = "auto"
     # откуда брать «уверенность»: auto = rerank, если включён, иначе dense, иначе bm25
     score_source: Literal["auto", "rerank", "dense", "bm25"] = "auto"
     calibration_path: str | None = "reports/calibration.json"
+    # Файл модели отказа (пишет `kbrag train-abstention`); свой для каждого конфига поиска.
+    model_path: str | None = None
 
 
 class GuardrailsConfig(_Strict):
@@ -141,6 +147,9 @@ class EvalConfig(_Strict):
 class AppConfig(_Strict):
     corpus_dir: str = "data/corpus"
     gold_path: str = "data/eval/gold.jsonl"
+    # Обучающие вопросы для классификатора отказа (`kbrag build-train`). Отдельно от gold:
+    # на gold оценивают, и обучение на нём было бы утечкой.
+    train_path: str = "data/eval/train.jsonl"
     cache_dir: str = ".cache"
     reports_dir: str = "reports"
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
