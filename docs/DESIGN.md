@@ -429,3 +429,19 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   `train-abstention [--model auto|logreg|catboost] [--out]`; `eval --save-calibration` при `method: classifier` → код 1.
 - Инфраструктура: `reports/abstention*.json` и `reports/abstention*.cbm` — в git и в Docker-образе (как калибровка);
   extra `classic = ["catboost>=1.2"]`, catboost также в `dev` (CI ставит `.[dev]`).
+
+### Правило решения для `configs/default.yaml` (зафиксировано до обучения модели)
+
+Записано **до** запуска `kbrag train-abstention --config configs/default.yaml`, чтобы решение нельзя было
+подогнать под результат. Для офлайн-конфига правило жило только в задании эксперимента, и проверить по
+истории git, что оно было заранее, нельзя (`docs/results/abstention.md`, раздел 4) — здесь это исправлено.
+
+1. Обучение и выбор кандидата — только на train (CV 5×3), порог решения — на dev по balanced accuracy,
+   как в офлайн-эксперименте. Test не участвует ни в одном выборе.
+2. `configs/default.yaml` переключается на `method: classifier` **только если на dev одновременно**:
+   (а) balanced accuracy классификатора при своём пороге выше, чем у порога по уверенности
+   (`score_source: dense`, порог из `reports/calibration.json`); (б) AUROC классификатора не ниже;
+   (в) при одинаковом числе отказов (рабочая точка порога) классификатор ловит не меньше вопросов без ответа.
+3. Иначе остаётся `method: threshold`. Модель `reports/abstention_default.json` коммитится в любом случае,
+   чтобы шаг сетки `hybrid_bm25_e5_rerank_clf` воспроизводился.
+4. Test-метрики обоих методов публикуются в `docs/results/abstention.md` только для отчёта, после решения.
