@@ -392,11 +392,7 @@ def _print_train_report(report: Any) -> None:
             f"{row['pr_auc_mean']:>9.3f} ± {row['pr_auc_std']:.3f}{mark}"
         )
     print(f"Выбрана модель: {report.chosen} (лучшая средняя ROC-AUC на CV; ничья — более простая)")
-    if not report.beats_baseline:
-        print(
-            "Внимание: модель не обгоняет бейзлайн (нынешний порог по уверенности) — "
-            "разумно оставить abstention.method: threshold."
-        )
+    print("  (бейзлайн на train-CV — только справка: сравнение с ним, по которому решают, — на dev ниже)")
 
     threshold = report.decision_threshold
     print(
@@ -421,6 +417,7 @@ def _print_train_report(report: Any) -> None:
         f"  {'порог':<24}{format_number(clf.get('threshold')):>22}{format_number(base.get('threshold')):>22}"
     )
     print(f"  (бейзлайн — {report.baseline_feature}: уверенность нынешнего порогового метода)")
+    _print_baseline_verdict(report)
 
     kind = "коэффициент (на стандартизованных признаках; + толкает к отказу)"
     if report.importance_kind != "coef":
@@ -428,6 +425,34 @@ def _print_train_report(report: Any) -> None:
     print(f"\nТоп признаков — {kind}:")
     for name, value in report.importance[:8]:
         print(f"  {name:<22}{value:>+10.3f}")
+
+
+def _print_baseline_verdict(report: Any) -> None:
+    """Единственная рекомендация команды: переключаться ли с порога на классификатор.
+
+    Решает разница AUROC на dev с парным 95% ДИ (``TrainReport.beats_baseline_dev``), а не
+    train-CV: если train устроен иначе, чем эталон, бейзлайн на train бывает почти случайным,
+    и выигрыш у него ничего не значит. Совпадение «на CV лучше, на dev — нет» печатаем отдельно:
+    это главный симптом сдвига распределения между train и эталоном.
+    """
+    diff = report.dev.get("auroc_diff") or {}
+    interval = diff.get("ci95")
+    diff_text = "не посчитана"
+    if interval is not None:
+        diff_text = f"{diff['value']:+.3f} [{interval[0]:+.3f}; {interval[1]:+.3f}]"
+    print(f"  AUROC «классификатор − бейзлайн» на dev [95% ДИ]: {diff_text}")
+    if report.beats_baseline_dev:
+        print("Модель разделяет классы на dev лучше бейзлайна (нижняя граница ДИ > 0).")
+        return
+    print(
+        "Внимание: на dev модель не доказала, что разделяет классы лучше бейзлайна (нижняя граница "
+        "ДИ ≤ 0) — разумно оставить abstention.method: threshold."
+    )
+    if report.beats_baseline_cv:
+        print(
+            "  На train-CV модель лучше бейзлайна, а на dev — нет: признак сдвига распределения "
+            "train → эталон (см. docs/results/abstention.md, раздел 2)."
+        )
 
 
 def _format_auroc_cell(entry: dict) -> str:

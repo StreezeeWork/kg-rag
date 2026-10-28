@@ -388,13 +388,19 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   минус (NaN → выше всех, `baseline_scores`), logreg `C ∈ {0.1, 1, 10}`, catboost `depth ∈ {2, 3, 4}`
   (`auto` без catboost — только logreg с предупреждением).
 - `choose_candidate` — лучшая средняя CV ROC-AUC среди обучаемых, ничья (1e-9) → более простая модель.
-  **Отступление от исходного плана:** бейзлайн в выборе не участвует — он и есть пороговый метод; если он лучше,
-  отчёт пишет «модель не обгоняет бейзлайн — оставьте `method: threshold`» (`TrainReport.beats_baseline`).
+  **Отступление от исходного плана:** бейзлайн в выборе не участвует — он и есть пороговый метод. Сравнение
+  с ним — на dev, не на train-CV (train может быть устроен иначе, чем эталон, и бейзлайн там почти случаен):
+  `metrics.auroc_diff_ci` — разница AUROC «классификатор − бейзлайн» на одних и тех же dev-вопросах с парным
+  стратифицированным bootstrap-ДИ (`dev["auroc_diff"]`); `TrainReport.beats_baseline_dev` — нижняя граница ДИ > 0.
+  Иначе отчёт пишет «на dev модель не доказала… — оставьте `method: threshold`» (и отдельной строкой, если на
+  CV модель лучше: признак сдвига train → эталон). `beats_baseline_cv` — только справка. В файле модели:
+  `cv_report.beats_baseline_cv`, `dev_metrics.auroc_diff` и `dev_metrics.beats_baseline_dev`.
 - `tune_decision_threshold(p, y)` — `choose_threshold([1 − p], answerable)` → порог `1 − t`; отказ при `p ≥ 1 − t`
   (порог — середина между значениями dev, на границе нет ни одного вопроса). Нет порога лучше balanced
   accuracy 0.5 → None: модель не сохраняется, `kbrag train-abstention` возвращает код 1.
-- `evaluate_on_dev` — AUROC (+95% ДИ) классификатора (`1 − p`) и бейзлайна, balanced accuracy, abstention
-  precision/recall/F1, FAR при своём пороге у каждого (метрики решения на dev оптимистичны).
+- `evaluate_on_dev` — AUROC (+95% ДИ) классификатора (`1 − p`) и бейзлайна, их парная разница (`auroc_diff`),
+  balanced accuracy, abstention precision/recall/F1, FAR при своём пороге у каждого (метрики решения на dev
+  оптимистичны).
 - `feature_importance` — logreg: коэффициенты на стандартизованных признаках; catboost: средний |SHAP|
   (`get_feature_importance(type="ShapValues")`, без столбца базового значения).
 - `train_abstention(cfg, model="auto", out=None, *, docs=None, train=None, gold=None, seed=0) -> TrainReport` —

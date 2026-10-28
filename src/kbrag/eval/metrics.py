@@ -595,3 +595,40 @@ def auroc_ci(
         values[i] = wins[np.ix_(rows, cols)].mean()
     low, high = np.percentile(values, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(low), float(high)
+
+
+def auroc_diff_ci(
+    confidences_a: Sequence[float | None],
+    confidences_b: Sequence[float | None],
+    answerable: Sequence[bool],
+    n_boot: int = BOOTSTRAP_SAMPLES,
+    alpha: float = 0.05,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float, float, float] | None:
+    """Разница ``auroc(a) − auroc(b)`` на одних и тех же вопросах и её bootstrap-интервал.
+
+    Зачем отдельная функция. ``paired_bootstrap_diff`` сравнивает средние по вопросам, а AUROC —
+    не среднее по вопросам, а доля выигранных пар «отвечаемый против неотвечаемого». Поэтому
+    ресэмплирование здесь как в ``auroc_ci`` (отвечаемые и неотвечаемые — по отдельности), но
+    **одна и та же** выборка вопросов идёт обоим методам: общая трудность вопросов сокращается,
+    и интервал разницы уже, чем если сравнивать два отдельных интервала.
+
+    Возвращает ``(разница, нижняя, верхняя)`` или None, если нет одного из классов. Интервал
+    включает 0 — по этим данным нельзя сказать, какой метод разделяет классы лучше.
+    """
+    if not len(confidences_a) == len(confidences_b) == len(answerable):
+        raise ValueError("confidences_a, confidences_b и answerable должны быть одной длины")
+    wins_a = _pairwise_wins(confidences_a, answerable)
+    wins_b = _pairwise_wins(confidences_b, answerable)
+    if wins_a is None or wins_b is None:
+        return None
+    rng = np.random.default_rng(seed)
+    n_pos, n_neg = wins_a.shape
+    values = np.empty(n_boot)
+    for i in range(n_boot):
+        rows = rng.integers(0, n_pos, size=n_pos)
+        cols = rng.integers(0, n_neg, size=n_neg)
+        cell = np.ix_(rows, cols)
+        values[i] = wins_a[cell].mean() - wins_b[cell].mean()
+    low, high = np.percentile(values, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return float(wins_a.mean() - wins_b.mean()), float(low), float(high)

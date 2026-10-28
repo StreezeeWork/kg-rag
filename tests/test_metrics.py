@@ -12,6 +12,7 @@ from kbrag.eval.metrics import (
     abstention_report,
     auroc,
     auroc_ci,
+    auroc_diff_ci,
     bootstrap_ci,
     choose_threshold,
     citation_precision,
@@ -580,3 +581,20 @@ def test_auroc_ci_contains_estimate_and_is_reproducible() -> None:
     assert low <= auroc(scores, answerable) <= high
     assert 0.5 < low < high < 1.0
     assert auroc_ci(scores, answerable) == (low, high)  # seed фиксирован
+
+
+def test_auroc_diff_ci_is_paired_and_reproducible() -> None:
+    rng = np.random.default_rng(2)
+    answerable = [bool(x) for x in rng.integers(0, 2, size=80)]
+    strong = [float(rng.normal(2.0 if ans else 0.0)) for ans in answerable]
+    noise = [float(rng.normal()) for _ in answerable]
+
+    # Метод против самого себя: разница ровно 0 в каждой bootstrap-выборке.
+    assert auroc_diff_ci(strong, strong, answerable) == (0.0, 0.0, 0.0)
+    diff, low, high = auroc_diff_ci(strong, noise, answerable)
+    assert diff == pytest.approx(auroc(strong, answerable) - auroc(noise, answerable))
+    assert 0.0 < low <= diff <= high  # сильный сигнал против шума — разница уверенно больше 0
+    assert auroc_diff_ci(strong, noise, answerable) == (diff, low, high)  # seed фиксирован
+    assert auroc_diff_ci([0.1, 0.2], [0.2, 0.1], [True, True]) is None  # нет неотвечаемых
+    with pytest.raises(ValueError):
+        auroc_diff_ci([0.1], [0.1, 0.2], [True, False])

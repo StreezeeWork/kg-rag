@@ -14,7 +14,9 @@
   Это отдельный файл, а не часть gold: на gold систему оценивают.
 * **dev** (часть gold) — только для порога решения. Порог — тоже параметр, подобранный по данным;
   подбирать его на тех же вопросах, на которых училась модель, значит получить оптимистичный порог
-  (на train модель увереннее, чем на новых вопросах).
+  (на train модель увереннее, чем на новых вопросах). На dev же модель сравнивается с бейзлайном
+  (нынешним порогом): train может быть устроен иначе, чем эталон, и выигрыш на train-CV ничего
+  не доказывает (``TrainReport.beats_baseline_dev``).
 * **test** (часть gold) — сюда не попадает вообще. Его честно меряет ``kbrag eval`` уже готовой
   модели с готовым порогом. ``fit_abstention`` получает train и dev явными списками и проверяет их
   ``split`` — test туда передать нельзя даже по ошибке.
@@ -51,7 +53,7 @@ from kbrag.eval.dataset import (
     train_gold_conflicts,
     validate_gold,
 )
-from kbrag.eval.metrics import abstention_report, auroc, auroc_ci, choose_threshold
+from kbrag.eval.metrics import abstention_report, auroc, auroc_ci, auroc_diff_ci, choose_threshold
 from kbrag.ingest import corpus_fingerprint, load_corpus
 from kbrag.pipeline import RAGPipeline, calibration_fingerprint
 from kbrag.types import Document
@@ -220,9 +222,10 @@ def _folds(labels: np.ndarray, seed: int):
 def choose_candidate(cv_results: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
     """Лучший обучаемый кандидат по средней CV ROC-AUC; ничья → более простой.
 
-    Бейзлайн в выборе не участвует: он и есть нынешний пороговый метод. Если он оказался лучше
-    всех моделей, это видно в отчёте (``TrainReport.beats_baseline``), и правильный вывод —
-    оставить ``abstention.method: threshold``, а не «выбрать бейзлайн» внутри классификатора.
+    Бейзлайн в выборе не участвует: он и есть нынешний пороговый метод. Сравнение с ним —
+    отдельный вопрос, и решается он на dev (``TrainReport.beats_baseline_dev``): если модель там
+    не доказала преимущества, правильный вывод — оставить ``abstention.method: threshold``,
+    а не «выбрать бейзлайн» внутри классификатора. Train-CV служит только выбору среди моделей.
     """
     trainable = [row for row in cv_results if row["model_type"] != "baseline"]
     if not trainable:
@@ -282,6 +285,10 @@ def evaluate_on_dev(
     У бейзлайна порог подбирается тем же ``choose_threshold`` на том же dev — иначе сравнение
     было бы нечестным. Помните: метрики решения тут **оптимистичны для обоих** (порог подобран
     на этих же вопросах); честная проверка — test в ``kbrag eval``. AUROC от порога не зависит.
+
+    ``auroc_diff`` — разница AUROC «классификатор − бейзлайн» на одних и тех же dev-вопросах
+    с парным 95% ДИ (``metrics.auroc_diff_ci``). По ней ``TrainReport.beats_baseline_dev``
+    решает, стоит ли вообще переключаться с порога на классификатор.
     """
     answerable = [int(label) == 0 for label in y]
     p = [float(value) for value in probabilities]
@@ -304,7 +311,9 @@ def evaluate_on_dev(
     if baseline_threshold is not None:
         abstained = [value is None or value < baseline_threshold for value in confidence]
         baseline.update(decision_metrics(abstained, y))
-    return {"classifier": classifier, "baseline": baseline}
+    diff = auroc_diff_ci(clf_confidence, confidence, answerable)
+    auroc_diff = {"value": diff[0], "ci95": [diff[1], diff[2]]} if diff is not None else {}
+    return {"classifier": classifier, "baseline": baseline, "auroc_diff": auroc_diff}
 
 
 def _as_list(interval: tuple[float, float] | None) -> list[float] | None:
@@ -363,14 +372,36 @@ class TrainReport:
     model_path: str | None = None
 
     @property
-    def beats_baseline(self) -> bool:
-        """Обгоняет ли выбранная модель бейзлайн по средней CV ROC-AUC."""
+    def beats_baseline_cv(self) -> bool:
+        """Обгоняет ли выбранная модель бейзлайн по средней CV ROC-AUC **на train** (только справка).
+
+        Решения по этому флагу не принимают: если train устроен иначе, чем эталон, бейзлайн на
+        train может быть почти случайным (так и вышло в docs/results/abstention.md), и выигрыш
+        у него ничего не говорит о качестве на эталоне. Для решения — ``beats_baseline_dev``.
+        """
         scores = {row["name"]: row["roc_auc_mean"] for row in self.cv}
         baseline = scores.get(f"baseline: {self.baseline_feature}")
         return baseline is None or scores[self.chosen] > baseline + TIE_TOLERANCE
 
+    @property
+    def beats_baseline_dev(self) -> bool:
+        """Доказала ли модель на dev, что разделяет классы лучше бейзлайна (нынешнего порога).
+
+        True, только если нижняя граница 95% ДИ разницы AUROC «классификатор − бейзлайн» на dev
+        больше 0. Бремя доказательства — на новом методе: он сложнее (≈20 признаков, файл модели,
+        проверки свежести), поэтому «не хуже в пределах шума» — это ещё не повод переключаться.
+        Сравнение именно на dev, а не на train-CV: dev — часть эталона, на котором систему
+        оценивают, а train может быть устроен иначе.
+        """
+        interval = (self.dev.get("auroc_diff") or {}).get("ci95")
+        return interval is not None and interval[0] > 0.0
+
     def to_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "beats_baseline": self.beats_baseline}
+        return {
+            **asdict(self),
+            "beats_baseline_cv": self.beats_baseline_cv,
+            "beats_baseline_dev": self.beats_baseline_dev,
+        }
 
 
 def fit_abstention(
@@ -480,10 +511,10 @@ def train_abstention(
             "baseline_feature": report.baseline_feature,
             "cv_report": {
                 "chosen": report.chosen,
-                "beats_baseline": report.beats_baseline,
+                "beats_baseline_cv": report.beats_baseline_cv,
                 "candidates": report.cv,
             },
-            "dev_metrics": report.dev,
+            "dev_metrics": {**report.dev, "beats_baseline_dev": report.beats_baseline_dev},
             "importance": {"kind": report.importance_kind, "values": report.importance},
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "versions": _library_versions(report.model_type),

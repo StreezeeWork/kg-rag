@@ -17,6 +17,7 @@ from abstention_helpers import DEV_UNANSWERABLE, train_records, write_jsonl
 
 from kbrag.abstention import FEATURE_NAMES, load_abstention_model, models
 from kbrag.abstention.train import (
+    TrainReport,
     baseline_scores,
     choose_candidate,
     cross_validate,
@@ -24,7 +25,7 @@ from kbrag.abstention.train import (
     train_abstention,
     tune_decision_threshold,
 )
-from kbrag.cli import EXIT_ERROR, EXIT_OK, main
+from kbrag.cli import EXIT_ERROR, EXIT_OK, _print_train_report, main
 from kbrag.config import AppConfig, deep_merge, load_config
 from kbrag.eval.dataset import find_near_duplicates, item_from_record, load_gold, train_gold_conflicts
 from kbrag.ingest import corpus_fingerprint, load_corpus
@@ -216,7 +217,7 @@ def test_train_abstention_saves_a_model_the_service_accepts(
     assert report.n_train == 22 and report.n_train_unanswerable == 10
     assert report.n_dev == 3 and report.n_dev_unanswerable == 1  # только dev, test не участвует
     assert report.importance_kind == "coef" and len(report.importance) == len(FEATURE_NAMES)
-    assert {"classifier", "baseline"} == set(report.dev)
+    assert {"classifier", "baseline", "auroc_diff"} == set(report.dev)
 
     model = load_abstention_model(cfg, corpus_sha256=corpus_fingerprint(mini_docs))
     assert model is not None and model.decision_threshold == pytest.approx(report.decision_threshold)
@@ -232,6 +233,9 @@ def test_train_abstention_saves_a_model_the_service_accepts(
     ):
         assert key in data
     assert data["cv_report"]["chosen"] == report.chosen
+    # Рекомендация «переключаться ли» — по dev; флаг train-CV подписан как справочный.
+    assert data["dev_metrics"]["beats_baseline_dev"] == report.beats_baseline_dev
+    assert "beats_baseline_cv" in data["cv_report"] and "auroc_diff" in data["dev_metrics"]
 
 
 def test_train_abstention_rejects_train_that_overlaps_gold(
@@ -350,3 +354,66 @@ def test_train_abstention_cli_needs_model_path(
     )
     assert main(["train-abstention", "--config", str(no_path)]) == EXIT_ERROR
     assert "model_path" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Рекомендация «оставить порог»: решает dev, а не train-CV
+# ---------------------------------------------------------------------------
+
+
+def report_with(cv_baseline: float, dev_diff_ci: tuple[float, float]) -> TrainReport:
+    """Отчёт обучения «руками»: CV-строки бейзлайна и модели, на dev — только разница AUROC с ДИ."""
+
+    def cv_row(name: str, auc: float) -> dict:
+        return {
+            "name": name,
+            "roc_auc_mean": auc,
+            "roc_auc_std": 0.07,
+            "pr_auc_mean": 0.5,
+            "pr_auc_std": 0.1,
+            "n_folds": 15,
+        }
+
+    low, high = dev_diff_ci
+    side = {"auroc": 0.7, "auroc_ci95": [0.6, 0.8], "threshold": 0.4}
+    return TrainReport(
+        model_type="logreg",
+        params={"C": 1.0},
+        chosen="logreg C=1",
+        baseline_feature="dense_top1",
+        cv=[cv_row("baseline: dense_top1", cv_baseline), cv_row("logreg C=1", 0.68)],
+        decision_threshold=0.4,
+        dev={
+            "classifier": side,
+            "baseline": side,
+            "auroc_diff": {"value": (low + high) / 2, "ci95": [low, high]},
+        },
+        importance_kind="coef",
+        importance=[("q_len", -0.8)],
+        n_train=300,
+        n_train_unanswerable=120,
+        n_dev=71,
+        n_dev_unanswerable=15,
+    )
+
+
+def test_weak_baseline_on_train_does_not_hide_the_keep_threshold_warning(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Регрессия: на train бейзлайн почти случаен (сдвиг распределения), модель его обгоняет на CV,
+    # а на dev — нет. Раньше флаг считался по CV, и предупреждение молчало ровно тогда, когда нужно.
+    report = report_with(cv_baseline=0.53, dev_diff_ci=(-0.233, 0.133))
+    assert report.beats_baseline_cv and not report.beats_baseline_dev
+    _print_train_report(report)
+    out = capsys.readouterr().out
+    assert "оставить abstention.method: threshold" in out
+    assert "сдвига распределения" in out
+    assert "-0.233" in out and "+0.133" in out
+
+
+def test_proven_dev_advantage_gives_no_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    report = report_with(cv_baseline=0.80, dev_diff_ci=(0.02, 0.20))
+    assert report.beats_baseline_dev and not report.beats_baseline_cv  # решает dev, а не CV
+    _print_train_report(report)
+    assert "оставить abstention.method: threshold" not in capsys.readouterr().out
+    assert report.to_dict()["beats_baseline_dev"] is True
