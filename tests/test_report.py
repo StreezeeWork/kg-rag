@@ -348,6 +348,15 @@ def test_leaderboard_intro_and_threshold_note_show_sample_sizes(results: list[Ex
     assert "Порог подбирается на dev: 3 отвечаемых и 1 неотвечаемых" in text
 
 
+def test_legend_explains_the_classifier_threshold_scale(results: list[ExperimentResult]) -> None:
+    # Регрессия: строку «classifier:logreg: 0.363» легко прочитать как «ответ, если уверенность ≥ 0.363».
+    # У классификатора правило обратное и порог взят из файла модели — легенда должна это сказать.
+    legend = render_leaderboard(results).split("## Как читать таблицы")[1]
+    assert "`classifier:<тип>`" in legend
+    assert "отказ, если p ≥ порога" in legend
+    assert "kbrag train-abstention" in legend
+
+
 def test_leaderboard_threshold_without_score_source_is_plain_number() -> None:
     result = make_result("old", 0.5)
     result.score_source = None  # отчёт, записанный до появления поля
