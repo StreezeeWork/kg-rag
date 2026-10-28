@@ -181,6 +181,8 @@ Guardrails работают до решения об отказе: даже пр
 - После правки поиска, корпуса или эталона: `make eval` и коммит файла калибровки. CI пересчитывает порог
   и сверяет его с закоммиченным (`scripts/check_calibration.py`).
 - Какой порог сейчас действует, показывает `GET /health` (`abstention_threshold`, `score_source`).
+  Чем решается отказ — поле `abstention_method`: `threshold`, `classifier:<тип>` (тогда порог по
+  P(нет ответа) — `abstention_decision_threshold`) или `disabled` (`abstention.enabled: false`).
 
 ## Конфигурация
 

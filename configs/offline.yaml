@@ -54,7 +54,9 @@ abstention:
   enabled: true         # лучше честно сказать «нет ответа», чем уверенно выдумать
   method: threshold     # threshold — порог по одной уверенности поиска; classifier — модель отказа на ~20 признаках
                         # выдачи (обучает `kbrag train-abstention --config configs/offline.yaml`). Переключать — только
-                        # если эксперимент hybrid_bm25_lsa_clf (configs/experiments.yaml) лучше порога по метрикам dev
+                        # если эксперимент hybrid_bm25_lsa_clf (configs/experiments.yaml) лучше порога по метрикам dev.
+                        # Переключили — поправьте и smoke-тест Docker в .github/workflows/ci.yml: он ждёт
+                        # abstention_threshold ≠ null, а при классификаторе порог в abstention_decision_threshold
   threshold: auto       # порог подбирается на dev при `kbrag eval`, а не «на глаз»; в файл для сервиса
                         # его пишет только `kbrag eval --config configs/offline.yaml --save-calibration`
   score_source: auto    # без реранкера уверенность берётся из dense-score (он сравним между вопросами)

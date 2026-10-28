@@ -722,10 +722,15 @@ def _add_routes(app: FastAPI, state: ServiceState) -> None:
             "generator": _component_name(pipeline, "generator"),
             # Из какого score поиска берётся «уверенность» (rerank / dense / bm25).
             "score_source": getattr(pipeline, "score_source", None),
-            # Чем решается отказ сейчас: "threshold" или "classifier:<модель>" (без файла модели —
-            # откат на порог, и это должно быть видно здесь, а не только в логах).
+            # Чем решается отказ сейчас: "threshold", "classifier:<модель>" или "disabled" (без файла
+            # модели — откат на порог, и это должно быть видно здесь, а не только в логах).
             "abstention_method": getattr(pipeline, "abstention_method", None),
+            # Порог по уверенности поиска (null при классификаторе и при выключенном отказе).
             "abstention_threshold": _finite_or_none(getattr(pipeline, "threshold", None)),
+            # Порог классификатора по P(нет ответа): отказ, если p ≥ порога (null без классификатора).
+            "abstention_decision_threshold": _finite_or_none(
+                getattr(getattr(pipeline, "abstention_model", None), "decision_threshold", None)
+            ),
         }
 
     @app.get("/metrics", summary="Метрики в формате Prometheus", response_class=PlainTextResponse)

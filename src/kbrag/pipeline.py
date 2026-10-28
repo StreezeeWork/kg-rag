@@ -287,9 +287,10 @@ class RAGPipeline:
                 logger.warning(
                     "Классификатор отказа недоступен: откат на пороговый метод (abstention.threshold)"
                 )
-        # При рабочем классификаторе порог не нужен: решает модель, а не одно число.
+        # Порог читаем, только если он действительно решает: при рабочем классификаторе решает модель,
+        # а при выключенном отказе — никто. Иначе /health показывал бы порог, который не применяется.
         threshold = None
-        if abstention_model is None:
+        if cfg.abstention.enabled and abstention_model is None:
             threshold = resolve_threshold(cfg, corpus_sha256=corpus_sha256)
         pipeline = cls(
             cfg,
@@ -316,11 +317,14 @@ class RAGPipeline:
 
     @property
     def abstention_method(self) -> str:
-        """Чем на самом деле решается отказ: ``classifier:<тип модели>`` или ``threshold``.
+        """Чем на самом деле решается отказ: ``classifier:<тип модели>``, ``threshold`` или ``disabled``.
 
         Может отличаться от ``cfg.abstention.method``: без подходящего файла модели сервис
         откатывается на порог — и ``/health`` должен честно показывать, что работает сейчас.
+        ``disabled`` — ``abstention.enabled: false``: сервис не отказывается ни по порогу, ни по модели.
         """
+        if not self.cfg.abstention.enabled:
+            return "disabled"
         if self.abstention_model is not None:
             return f"classifier:{self.abstention_model.model_type}"
         return "threshold"

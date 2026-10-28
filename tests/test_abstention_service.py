@@ -206,8 +206,23 @@ def test_api_reports_abstain_score_and_method(tmp_path: Path, mini_docs: list[Do
     assert ABSTAIN_CLASSIFIER_FLAG in response.flags
 
     with TestClient(create_app(cfg=cfg, pipeline=pipeline)) as client:
-        assert client.get("/health").json()["abstention_method"] == "classifier:logreg"
+        health = client.get("/health").json()
+        assert health["abstention_method"] == "classifier:logreg"
+        # Порог модели виден в /health; порога по уверенности при классификаторе нет.
+        assert health["abstention_decision_threshold"] == 0.5 and health["abstention_threshold"] is None
         assert client.post("/ask", json={"question": VACATION_Q}).json()["abstain_score"] < 0.5
+
+
+def test_health_reports_disabled_abstention(tmp_path: Path, mini_docs: list[Document]) -> None:
+    # Регрессия: при abstention.enabled: false /health показывал метод "threshold" и действующий
+    # порог, хотя сервис не отказывается никогда.
+    cfg = make_cfg(tmp_path, abstention={"enabled": False, "method": "threshold", "threshold": 0.5})
+    pipeline = RAGPipeline.from_config(cfg, docs=mini_docs)
+    assert pipeline.abstention_method == "disabled" and pipeline.threshold is None
+    with TestClient(create_app(cfg=cfg, pipeline=pipeline)) as client:
+        health = client.get("/health").json()
+    assert health["abstention_method"] == "disabled"
+    assert health["abstention_threshold"] is None and health["abstention_decision_threshold"] is None
 
 
 # ---------------------------------------------------------------------------

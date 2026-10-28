@@ -414,7 +414,7 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   нет подходящей — WARNING и откат на порог (`resolve_threshold`), при рабочей модели `threshold = None`.
   `abstain_score(question, contexts)`, `abstention_flag(confidence, abstain_score)` (классификатор — флаг
   `abstain_classifier`, иначе порог — `low_confidence`; методы не складываются), свойство `abstention_method`
-  (`"threshold"` / `"classifier:<тип>"`). p считается по тем же фрагментам, что `confidence`, и всегда
+  (`"threshold"` / `"classifier:<тип>"` / `"disabled"` при `enabled: false` — тогда и порог не читается). p считается по тем же фрагментам, что `confidence`, и всегда
   (в том числе при `apply_threshold=False`); guardrails по-прежнему до решения. `Answer.abstain_score: float | None`.
 - runner: при `method: classifier` модель обязательна (`ValueError` «сначала kbrag train-abstention»), порог —
   `decision_threshold` модели без переподбора; `dev_sha256` модели ≠ `items_fingerprint` текущего dev →
@@ -425,7 +425,7 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   `run_grid` пропускает (skipped) эксперимент-классификатор без файла модели; устаревшая модель — ошибка прогона.
 - `experiments.yaml`: `hybrid_bm25_lsa_clf` (= offline.yaml по отпечатку) и `hybrid_bm25_e5_rerank_clf`
   (`requires_neural`, ревизии закреплены, = default.yaml по отпечатку; проверяет `tests/test_configs.py`).
-- API: `AskResponse.abstain_score` (null без классификатора), `/health` → `abstention_method`. CLI: `build-train`,
+- API: `AskResponse.abstain_score` (null без классификатора), `/health` → `abstention_method`, `abstention_decision_threshold` (порог модели). CLI: `build-train`,
   `train-abstention [--model auto|logreg|catboost] [--out]`; `eval --save-calibration` при `method: classifier` → код 1.
 - Инфраструктура: `reports/abstention*.json` и `reports/abstention*.cbm` — в git и в Docker-образе (как калибровка);
   extra `classic = ["catboost>=1.2"]`, catboost также в `dev` (CI ставит `.[dev]`).
