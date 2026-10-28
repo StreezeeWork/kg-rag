@@ -368,7 +368,7 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
 `abstention/models.py`
 - `make_estimator("logreg", {"C": c})` — `SimpleImputer(median, keep_empty_features=True)` → `StandardScaler` →
   `LogisticRegression(class_weight="balanced")`; `make_estimator("catboost", {"depth": d})` — `CATBOOST_DEFAULTS`
-  (400 итераций, lr 0.05, l2 5, `auto_class_weights="Balanced"`, `random_seed=0`, без файлов на диске).
+  (400 итераций, lr 0.05, l2 5, `auto_class_weights="Balanced"`, `random_seed` — `seed` обучения, по умолчанию 0, без файлов на диске).
   catboost импортируется лениво (`ImportError` с «pip install -e .[classic]»).
 - `AbstentionModel`: `predict_proba(rows | matrix)` = P(в базе нет ответа), `predict_one`, `abstains(p)` ⇔
   `p >= decision_threshold`; `metadata`: `fingerprint` (`calibration_fingerprint`), `corpus_sha256`, `train_sha256`,
@@ -387,7 +387,7 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   (average precision по классу «нет ответа») mean ± std. Кандидаты: бейзлайн `<score_source>_top1` со знаком
   минус (NaN → выше всех, `baseline_scores`), logreg `C ∈ {0.1, 1, 10}`, catboost `depth ∈ {2, 3, 4}`
   (`auto` без catboost — только logreg с предупреждением).
-- `choose_candidate` — лучшая средняя CV ROC-AUC среди обучаемых, ничья (1e-9) → более простая модель.
+- `choose_candidate` — лучшая средняя CV ROC-AUC среди обучаемых, ничья (1e-9) → более простая модель (меньше `complexity`, кандидаты сортируются по нему).
   **Отступление от исходного плана:** бейзлайн в выборе не участвует — он и есть пороговый метод. Сравнение
   с ним — на dev, не на train-CV (train может быть устроен иначе, чем эталон, и бейзлайн там почти случаен):
   `metrics.auroc_diff_ci` — разница AUROC «классификатор − бейзлайн» на одних и тех же dev-вопросах с парным

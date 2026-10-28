@@ -16,6 +16,7 @@ import yaml
 from abstention_helpers import DEV_UNANSWERABLE, train_records, write_jsonl
 
 from kbrag.abstention import FEATURE_NAMES, load_abstention_model, models
+from kbrag.abstention import train as abstention_train
 from kbrag.abstention.train import (
     TrainReport,
     baseline_scores,
@@ -106,8 +107,26 @@ def test_choice_by_mean_roc_auc_and_ties_go_to_simpler_model() -> None:
         row("catboost depth=2", "catboost", 0.85, 3),  # ничья с более простой моделью
     ]
     assert choose_candidate(cv)["name"] == "logreg C=1"
+    # Ничью решает complexity, а не порядок строк: перевёрнутая таблица даёт тот же выбор.
+    assert choose_candidate(cv[::-1])["name"] == "logreg C=1"
     cv.append(row("catboost depth=3", "catboost", 0.86, 4))
     assert choose_candidate(cv)["name"] == "catboost depth=3"
+
+
+def test_seed_reaches_catboost(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Регрессия: seed менял только фолды, а CatBoost всегда обучался с random_seed=0.
+    pytest.importorskip("catboost")
+    seen: list[dict] = []
+    real_make_estimator = abstention_train.make_estimator
+
+    def spy(model_type: str, params: dict | None = None):
+        seen.append({"model_type": model_type, **(params or {})})
+        return real_make_estimator("logreg")  # быстрый заменитель: тест про проброс seed, не про качество
+
+    monkeypatch.setattr(abstention_train, "make_estimator", spy)
+    rows, y = synthetic_rows()
+    cross_validate(rows, y, seed=7, model="catboost")
+    assert seen and all(p["model_type"] == "catboost" and p["random_seed"] == 7 for p in seen)
 
 
 # ---------------------------------------------------------------------------

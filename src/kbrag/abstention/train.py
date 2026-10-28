@@ -115,7 +115,11 @@ def baseline_scores(rows: Sequence[Mapping[str, float]], feature: str) -> np.nda
 
 @dataclass(frozen=True)
 class Candidate:
-    """Кандидат на роль модели отказа. ``complexity`` решает ничьи: меньше — проще."""
+    """Кандидат на роль модели отказа.
+
+    ``complexity`` — место в списке ``make_candidates`` (меньше — проще). ``choose_candidate``
+    перебирает кандидатов по возрастанию ``complexity`` и при ничьей оставляет более простого.
+    """
 
     name: str
     model_type: str  # "baseline" | "logreg" | "catboost"
@@ -167,6 +171,7 @@ def cross_validate(
       поэтому разницу меньше одного std между кандидатами всерьёз не воспринимаем.
 
     Если вопросов без ответа меньше 5, фолдов столько, сколько их есть (минимум 2).
+    ``seed`` задаёт и разбиение на фолды, и случайность CatBoost (``_seeded``).
     """
     matrix = features_to_matrix(rows)
     labels = np.asarray(y, dtype=int)
@@ -179,7 +184,9 @@ def cross_validate(
             if candidate.model_type == "baseline":
                 scores = baseline[valid_idx]
             else:
-                estimator = make_estimator(candidate.model_type, candidate.params)
+                estimator = make_estimator(
+                    candidate.model_type, _seeded(candidate.model_type, candidate.params, seed)
+                )
                 estimator.fit(matrix[train_idx], labels[train_idx])
                 scores = estimator.predict_proba(matrix[valid_idx])[:, 1]
             roc.append(roc_auc_score(labels[valid_idx], scores))
@@ -206,6 +213,18 @@ def cross_validate(
     return results
 
 
+def _seeded(model_type: str, params: Mapping[str, Any], seed: int) -> dict[str, Any]:
+    """Параметры для ``make_estimator`` с тем же ``seed``, что у фолдов.
+
+    Зачем: ``seed`` обещает воспроизводимость всего обучения, а не только разбиения на фолды.
+    У CatBoost своя случайность (подвыборки, порядок объектов), и без проброса она была бы
+    всегда ``random_seed = 0`` из ``CATBOOST_DEFAULTS``. У logreg случайности нет — параметры как есть.
+    """
+    if model_type == "catboost":
+        return {**params, "random_seed": seed}
+    return dict(params)
+
+
 def _folds(labels: np.ndarray, seed: int):
     n_minority = int(min(labels.sum(), len(labels) - labels.sum()))
     if n_minority < 2:
@@ -227,7 +246,11 @@ def choose_candidate(cv_results: Sequence[Mapping[str, Any]]) -> Mapping[str, An
     не доказала преимущества, правильный вывод — оставить ``abstention.method: threshold``,
     а не «выбрать бейзлайн» внутри классификатора. Train-CV служит только выбору среди моделей.
     """
-    trainable = [row for row in cv_results if row["model_type"] != "baseline"]
+    # Сортировка по complexity, а не доверие порядку списка: правило «ничья → проще» не должно
+    # зависеть от того, в каком порядке строки таблицы CV пришли в функцию.
+    trainable = sorted(
+        (row for row in cv_results if row["model_type"] != "baseline"), key=lambda row: row["complexity"]
+    )
     if not trainable:
         raise ValueError("нет ни одного обучаемого кандидата")
     best = trainable[0]
@@ -427,7 +450,9 @@ def fit_abstention(
     cv = cross_validate(rows_train, y_train, seed=seed, model=model, baseline_feature=baseline_feature)
     best = choose_candidate(cv)
     matrix_train = features_to_matrix(rows_train)
-    estimator = make_estimator(best["model_type"], best["params"]).fit(matrix_train, y_train)
+    estimator = make_estimator(best["model_type"], _seeded(best["model_type"], best["params"], seed)).fit(
+        matrix_train, y_train
+    )
 
     # Предсказания dev — через ту же обёртку AbstentionModel, что в сервисе (для logreg — numpy-код из JSON).
     probe = AbstentionModel.from_estimator(best["model_type"], estimator, 0.5, params=best["params"])
