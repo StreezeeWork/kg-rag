@@ -226,7 +226,12 @@ class AskResponse(BaseModel):
 
     answer: str
     abstained: bool = Field(description="True — система отказалась отвечать («в базе нет ответа»)")
-    confidence: float | None = Field(description="Уверенность поиска, по ней принимается решение об отказе")
+    confidence: float | None = Field(
+        description=(
+            "Уверенность поиска; при пороговом методе по ней принимается решение об отказе, "
+            "при классификаторе — это один из его признаков (решает abstain_score)"
+        )
+    )
     abstain_score: float | None = Field(
         default=None,
         description="Вероятность «в базе нет ответа» от классификатора отказа; null — классификатор не используется",

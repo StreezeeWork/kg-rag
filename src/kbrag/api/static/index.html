@@ -685,7 +685,9 @@
       flags.filter((f) => f.startsWith(`${INJECTION_PREFIX}:`)).map((f) => f.slice(INJECTION_PREFIX.length + 1)));
     const hasInjection = flags.some((f) => f === INJECTION_PREFIX || f.startsWith(`${INJECTION_PREFIX}:`));
 
-    renderBadges({ abstained, confidence: data.confidence, flags, hasInjection, injectedChunks });
+    renderBadges({
+      abstained, confidence: data.confidence, abstainScore: data.abstain_score, flags, hasInjection, injectedChunks,
+    });
     renderAnswer(String(data.answer ?? ""), contextsByCitation, abstained);
     renderTimings(data.timings_ms, clientMs);
     renderContexts(contexts, citedChunks, injectedChunks, abstained);
@@ -697,16 +699,22 @@
       : `Ответ готов. ${citedChunks.size} ${plural(citedChunks.size, "ссылка", "ссылки", "ссылок")} на источники.`;
   }
 
-  function renderBadges({ abstained, confidence, flags, hasInjection, injectedChunks }) {
+  function renderBadges({ abstained, confidence, abstainScore, flags, hasInjection, injectedChunks }) {
     const badges = [];
+    // abstain_score — P(нет ответа) от классификатора отказа. Он есть в ответе, только когда об отказе
+    // решает классификатор; null — решает порог по уверенности. Поэтому /health здесь не нужен:
+    // каждый ответ сам говорит, каким методом принималось решение.
+    const byClassifier = typeof abstainScore === "number" && Number.isFinite(abstainScore);
     if (abstained) {
-      const lowConfidence = flags.includes("low_confidence");
-      badges.push(el("span", {
-        className: "badge abstain",
-        title: lowConfidence
-          ? "Уверенность поиска ниже калиброванного порога — ассистент не стал отвечать"
-          : "Генератор не нашёл ответа в найденных фрагментах",
-      }, icon("info"), "Нет ответа в базе"));
+      // Три разные причины отказа — и три разные подсказки: при отказе по порогу или классификатору
+      // генератор вообще не вызывался, и писать «генератор не нашёл ответа» было бы неправдой.
+      let reason = "Генератор не нашёл ответа в найденных фрагментах";
+      if (flags.includes("low_confidence")) {
+        reason = "Уверенность поиска ниже калиброванного порога — ассистент не стал отвечать";
+      } else if (flags.includes("abstain_classifier")) {
+        reason = "Классификатор отказа оценил, что в базе нет ответа (генератор не вызывался)";
+      }
+      badges.push(el("span", { className: "badge abstain", title: reason }, icon("info"), "Нет ответа в базе"));
     } else {
       badges.push(el("span", { className: "badge ok" }, icon("check"), "Ответ по базе знаний"));
     }
@@ -715,8 +723,16 @@
       badges.push(el("span", {
         className: "badge neutral",
         title: `Насколько поиск уверен в лучшем фрагменте${scoreSourceLabel ? ` (${scoreSourceLabel})` : ""}. `
-          + "Ниже порога ассистент отказывается отвечать.",
+          + (byClassifier
+            ? "Об отказе решает классификатор, а уверенность — лишь один из его признаков."
+            : "Ниже порога ассистент отказывается отвечать."),
       }, icon("gauge"), "Уверенность ", el("span", { className: "num", text: formatScore(confidence) })));
+    }
+    if (byClassifier) {
+      badges.push(el("span", {
+        className: "badge neutral",
+        title: "Оценка классификатора отказа: если она не ниже его порога, ассистент не отвечает",
+      }, icon("gauge"), "P(нет ответа) ", el("span", { className: "num", text: formatScore(abstainScore) })));
     }
 
     if (hasInjection) {
@@ -736,7 +752,7 @@
     }
 
     // Прочие флаги (кроме уже показанных) — как есть: полезно при отладке.
-    const known = (f) => f === "low_confidence" || f === "question_injection"
+    const known = (f) => f === "low_confidence" || f === "abstain_classifier" || f === "question_injection"
       || f === INJECTION_PREFIX || f.startsWith(`${INJECTION_PREFIX}:`);
     for (const flag of flags.filter((f) => !known(f))) {
       badges.push(el("span", { className: "badge neutral", text: flag }));

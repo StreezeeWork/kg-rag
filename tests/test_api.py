@@ -34,7 +34,7 @@ from kbrag.api.app import (
 from kbrag.config import AppConfig
 from kbrag.generation import LLMError
 from kbrag.generation.citations import CITATION_RE
-from kbrag.pipeline import RAGPipeline
+from kbrag.pipeline import ABSTAIN_CLASSIFIER_FLAG, RAGPipeline
 from kbrag.types import Answer, Chunk, Citation, Document, ScoredChunk
 
 # abstain_score — P(нет ответа) от классификатора отказа (null при пороговом методе).
@@ -284,6 +284,16 @@ def test_page_citation_regex_matches_the_server_one() -> None:
     page = INDEX_HTML.read_text(encoding="utf-8")
     js_pattern = re.search(r"const CITATION_RE = /(.+)/g;", page).group(1)
     assert js_pattern == CITATION_RE.pattern
+
+
+def test_page_explains_a_classifier_abstention() -> None:
+    # Регрессия: страница искала причину отказа только по low_confidence и объясняла отказ
+    # классификатора словами «генератор не нашёл ответа» (генератор при этом не вызывался),
+    # показывала флаг сырым именем и нигде не выводила P(нет ответа) из abstain_score.
+    page = INDEX_HTML.read_text(encoding="utf-8")
+    assert f'flags.includes("{ABSTAIN_CLASSIFIER_FLAG}")' in page  # своя подсказка у бейджа отказа
+    assert f'f === "{ABSTAIN_CLASSIFIER_FLAG}"' in page  # known(): без дубля сырым бейджем
+    assert "data.abstain_score" in page and "P(нет ответа)" in page
 
 
 # ---------------------------------------------------------------------------
