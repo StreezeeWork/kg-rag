@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +22,7 @@ from kbrag.api.app import build_ask_response, create_app
 from kbrag.cli import EXIT_ERROR, main
 from kbrag.config import AppConfig, deep_merge
 from kbrag.eval import runner
-from kbrag.eval.dataset import GoldItem, item_from_record
+from kbrag.eval.dataset import GoldItem, item_from_record, items_fingerprint
 from kbrag.eval.report import write_report
 from kbrag.eval.runner import run_experiment, run_grid
 from kbrag.generation import ABSTAIN_TEXT, GenerationResult, Generator
@@ -242,6 +243,23 @@ def test_runner_uses_the_model_threshold_without_retuning(
     assert "classifier" in result.confidence_auroc["test"]
     leaderboard = write_report([result], tmp_path / "report").read_text(encoding="utf-8")
     assert "classifier" in leaderboard
+
+
+def test_runner_refuses_a_model_tuned_on_another_dev(
+    tmp_path: Path, mini_docs: list[Document], gold: list[GoldItem]
+) -> None:
+    # Регрессия: порог модели подобран на dev при обучении. Если пересборка эталона перенесла
+    # dev-вопрос в test, оценка не должна молча применять этот порог к test (утечка).
+    cfg = make_cfg(tmp_path, abstention={"threshold": "auto"})
+    model = hand_model(threshold=0.42)
+    model.metadata["dev_sha256"] = items_fingerprint([item for item in gold if item.split == "dev"])
+    save_for(cfg, mini_docs, model)
+    assert run_experiment(cfg, name="clf", gold=gold, docs=mini_docs).threshold == 0.42  # тот же dev
+
+    moved_qid = next(item.qid for item in gold if item.split == "dev")
+    resplit = [replace(item, split="test") if item.qid == moved_qid else item for item in gold]
+    with pytest.raises(ValueError, match="другом dev"):
+        run_experiment(cfg, name="clf", gold=resplit, docs=mini_docs)
 
 
 def test_runner_requires_a_model_for_classifier_method(

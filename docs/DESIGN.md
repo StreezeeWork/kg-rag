@@ -411,7 +411,9 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   (`"threshold"` / `"classifier:<тип>"`). p считается по тем же фрагментам, что `confidence`, и всегда
   (в том числе при `apply_threshold=False`); guardrails по-прежнему до решения. `Answer.abstain_score: float | None`.
 - runner: при `method: classifier` модель обязательна (`ValueError` «сначала kbrag train-abstention»), порог —
-  `decision_threshold` модели без переподбора; отказ = отказ генератора или `p ≥ порога`; `per_question` —
+  `decision_threshold` модели без переподбора; `dev_sha256` модели ≠ `items_fingerprint` текущего dev →
+  `ValueError` «переобучите» (после `build-gold` вопросы могли перейти между dev и test; нет поля — не сверяем),
+  свежесть `train_sha256`/`dev_sha256` закоммиченной офлайн-модели проверяет `tests/test_infra.py`; отказ = отказ генератора или `p ≥ порога`; `per_question` —
   поле `abstain_score`, в `confidence_by_source` — `"classifier": 1 − p`; `score_source = "classifier:<тип>"`;
   `confidence_auroc` и таблица AUROC leaderboard — источник `classifier` (`results.AUROC_SOURCES`).
   `run_grid` пропускает (skipped) эксперимент-классификатор без файла модели; устаревшая модель — ошибка прогона.

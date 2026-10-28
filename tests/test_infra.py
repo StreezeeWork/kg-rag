@@ -23,12 +23,14 @@ import yaml
 from packaging.requirements import Requirement
 
 from kbrag.config import load_config
+from kbrag.eval.dataset import items_fingerprint, load_gold
 from kbrag.ingest import corpus_fingerprint, load_corpus
 from kbrag.pipeline import load_calibration
 from kbrag.types import Document, ScoredChunk
 
 ROOT = Path(__file__).resolve().parents[1]
 OFFLINE_CALIBRATION = "reports/calibration_offline.json"
+OFFLINE_ABSTENTION_MODEL = "reports/abstention_offline.json"
 
 
 def load_script(name: str) -> ModuleType:
@@ -85,6 +87,19 @@ def test_abstention_model_reaches_git_and_image(path: str) -> None:
     # Модель отказа сервис читает так же, как калибровку: свежий клон и Docker-образ должны её получить.
     assert not git_ignores(path)
     assert {"!reports/abstention*.json", "!reports/abstention*.cbm"} <= dockerignore_patterns()
+
+
+def test_committed_abstention_model_matches_current_data() -> None:
+    # Модель отказа в git обучена на train и подобрала порог на dev. Изменился train (правка
+    # train_parts) — модель устарела; изменился dev (пересборка эталона перенесла вопросы между
+    # dev и test) — `kbrag eval` с method: classifier упадёт, а test мог бы получить порог,
+    # подобранный на его же вопросе. Тест ловит это сразу, без полного прогона.
+    # Упал — `kbrag train-abstention --config configs/offline.yaml` и коммит файла модели.
+    model = json.loads((ROOT / OFFLINE_ABSTENTION_MODEL).read_text(encoding="utf-8"))
+    dev = [item for item in load_gold(ROOT / "data/eval/gold.jsonl") if item.split == "dev"]
+    train = load_gold(ROOT / "data/eval/train.jsonl")
+    assert model["dev_sha256"] == items_fingerprint(dev), "модель подбирала порог на другом dev"
+    assert model["train_sha256"] == items_fingerprint(train), "модель обучена на другом train"
 
 
 def test_committed_calibration_matches_offline_config(monkeypatch: pytest.MonkeyPatch) -> None:
