@@ -288,7 +288,7 @@
 {"id": "tr-it-063", "question": "Сколько человек максимум можно добавить в один общий сейф менеджера паролей?", "answer": "", "key_facts": [], "evidence": [], "type": "unanswerable", "split": "train"}
 {"id": "tr-it-064", "question": "Как часто нужно заново проходить курс «Безопасная работа с production»?", "answer": "", "key_facts": [], "evidence": [], "type": "unanswerable", "split": "train"}
 {"id": "tr-it-065", "question": "Какие браузеры официально поддерживаются для работы с «Атласом» и «Орбитой»?", "answer": "", "key_facts": [], "evidence": [], "type": "unanswerable", "split": "train"}
-{"id": "tr-it-066", "question": "Можно ли загружать рабочие документы в ChatGPT или другие внешние нейросети, чтобы быстрее сделать саммари?", "answer": "", "key_facts": [], "evidence": [], "type": "unanswerable", "split": "train"}
+{"id": "tr-it-066", "question": "Проверяет ли почтовая система исходящие письма с меткой «[КОНФИДЕНЦИАЛЬНО]» и задерживает ли их, если получатель внешний?", "answer": "", "key_facts": [], "evidence": [], "type": "unanswerable", "split": "train"}
 {"id": "tr-it-067", "question": "Сколько хранятся записи звонков на номер 1111?", "answer": "", "key_facts": [], "evidence": [], "type": "unanswerable", "split": "train"}
 {"id": "tr-it-068", "question": "Какая операционная система по умолчанию ставится на ThinkPad P14s у разработчиков — Windows или Linux?", "answer": "", "key_facts": [], "evidence": [], "type": "unanswerable", "split": "train"}
 {"id": "tr-it-069", "question": "Чем шифруется диск корпоративного ноутбука: BitLocker, FileVault или другим средством?", "answer": "", "key_facts": [], "evidence": [], "type": "unanswerable", "split": "train"}
