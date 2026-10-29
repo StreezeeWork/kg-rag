@@ -4,7 +4,8 @@
 #
 # Сборка:
 #   docker build -t kbrag .                                            # ядро: BM25 + LSA, без torch
-#   docker build -t kbrag-neural --build-arg INSTALL_NEURAL=true .     # + sentence-transformers и torch (CPU)
+#   docker build -t kbrag-neural --build-arg INSTALL_NEURAL=true .     # + sentence-transformers, torch (CPU) и catboost
+#                                                                      #   (модель отказа configs/default.yaml — CatBoost)
 # Запуск (127.0.0.1 — порт открыт только для этой машины: у сервиса нет ни авторизации, ни лимита
 # запросов, поэтому наружу его выставляют только за reverse proxy с авторизацией и rate limit):
 #   docker run --rm -p 127.0.0.1:8080:8080 kbrag
@@ -46,7 +47,7 @@ COPY src ./src
 # torch уже стоит (если нужен), поэтому pip не будет тянуть тяжёлую CUDA-сборку с PyPI.
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$INSTALL_NEURAL" = "true" ]; then \
-        pip install ".[neural]"; \
+        pip install ".[neural,classic]"; \
     else \
         pip install .; \
     fi
