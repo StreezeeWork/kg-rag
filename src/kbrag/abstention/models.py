@@ -131,7 +131,7 @@ def make_estimator(model_type: str, params: Mapping[str, Any] | None = None) -> 
 
 @dataclass(frozen=True)
 class LogRegParams:
-    """Всё, что нужно для предсказания обученного sklearn-пайплайна logreg, — пять массивов чисел.
+    """Всё, что нужно для предсказания обученного sklearn-пайплайна logreg, — четыре массива и свободный член.
 
     Предсказание повторяет sklearn шаг в шаг: NaN → медиана, ``(x − mean) / scale``,
     ``σ(x · coef + intercept)``. Так файл модели — обычный JSON, который можно прочитать глазами
