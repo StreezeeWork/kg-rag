@@ -196,8 +196,9 @@ LLM-строка: модель через `scripts/serve_local_llm.py` на GTX 
   модели отказа нет, он битый или поменялся код признаков. У модели и запасного порога общие отпечаток поиска и
   хэш корпуса, поэтому после правки поиска или корпуса не подходят оба, и нейросервис не отказывается вовсе
   (`/health`: `abstention_method: threshold`, `abstention_threshold: null`). Тогда нужно переобучить модель
-  (`kbrag train-abstention --config configs/default.yaml`) и пересчитать запасной порог: временная копия
-  `configs/default.yaml` с `abstention.method: threshold` и `kbrag eval --config <копия> --save-calibration`.
+  (`kbrag train-abstention --config configs/default.yaml`) и пересчитать запасной порог тем же конфигом,
+  но с отказом по порогу: `make eval CONFIG=configs/default.yaml NAME=neural_threshold METHOD=threshold`
+  (= `KBRAG_ABSTENTION_METHOD=threshold kbrag eval --config configs/default.yaml --save-calibration`).
   Свежесть запасного порога CI не проверяет: он сверяет только `reports/calibration_offline.json`.
 - Эти файлы **лежат в git**: свежий клон, `make serve` и Docker-образ сразу умеют отказываться.
 - В файле записаны отпечаток настроек поиска, шкала уверенности (`dense`, `rerank`, `bm25`) и хэш корпуса.
@@ -220,6 +221,7 @@ LLM-строка: модель через `scripts/serve_local_llm.py` на GTX 
 | `KBRAG_CORPUS_DIR` | другой каталог с документами |
 | `KBRAG_GENERATION_BACKEND`, `KBRAG_LLM_BASE_URL`, `KBRAG_LLM_MODEL`, `LLM_API_KEY` | генерация через LLM |
 | `KBRAG_LLM_TIMEOUT_S`, `KBRAG_LLM_MAX_TOKENS` | лимиты LLM (таймаут вызова, длина ответа) для медленной локальной модели |
+| `KBRAG_ABSTENTION_METHOD` | способ отказа (`threshold` или `classifier`) поверх конфига: так пересчитывают запасной порог нейроконфига и сравнивают методы без копии YAML |
 | `KBRAG_ALLOWED_HOSTS` | допустимые значения заголовка Host через запятую; по умолчанию localhost, 127.0.0.1, [::1], app. Открываете сервис по IP или имени в сети — добавьте его, иначе ответ 400 |
 | `KBRAG_LOG_LEVEL` | уровень логов kbrag (по умолчанию INFO) |
 | `HF_HOME` | куда скачивать модели Hugging Face |

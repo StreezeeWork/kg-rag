@@ -100,10 +100,9 @@ kbrag eval --config configs/offline.yaml --name offline
 kbrag eval --config configs/default.yaml --name neural            # нужен make install-neural; отказ — классификатор
 kbrag grid --only hybrid_bm25_e5_rerank_clf --out reports/abstention_cmp_neural_grid   # то же шагом сетки
 
-# Строки «порог»: тот же конфиг с abstention.method: threshold. Повторный прогон default_threshold сделан на
-# коммите 8029af0, где default.yaml ещё стоял на пороге; сейчас то же даёт временная копия (reports/ в git не попадает).
-sed 's/^  method: classifier/  method: threshold/' configs/default.yaml > reports/default_threshold.yaml
-kbrag eval --config reports/default_threshold.yaml --name default_threshold --out reports/abstention_cmp_neural
+# Строки «порог»: тот же конфиг с отказом по порогу. Повторный прогон default_threshold сделан на коммите 8029af0,
+# где default.yaml ещё стоял на пороге; сейчас то же даёт переменная окружения поверх конфига.
+KBRAG_ABSTENTION_METHOD=threshold kbrag eval --config configs/default.yaml --name default_threshold --out reports/abstention_cmp_neural
 
 # LLM: сервер в отдельном окружении .venv-llm с CUDA-сборкой torch (ONBOARDING.md, раздел 6.4)
 python scripts/serve_local_llm.py --model Qwen/Qwen2.5-1.5B-Instruct --quantize 4bit --port 8001

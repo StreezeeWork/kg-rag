@@ -340,7 +340,9 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
 Зачем: пороговый метод смотрит на одно число — лучший score одного источника. Классификатор
 решает «отвечать ли» по ~20 признакам выдачи сразу (форма выдачи, согласие поисковиков, покрытие
 слов вопроса). Это классическая табличная задача, и она решается классическими моделями.
-Боевые конфиги пока на `method: threshold`; переключение — по итогам экспериментов `*_clf` на dev.
+Какой конфиг на чём работает, решено по экспериментам `*_clf` на dev: `configs/offline.yaml` остаётся на
+`method: threshold`, `configs/default.yaml` переключён на `method: classifier` (правило решения — ниже,
+цифры — docs/results/abstention.md).
 
 **Данные и утечки**
 - Обучающие вопросы — отдельный файл `data/eval/train.jsonl` (`AppConfig.train_path`), `split = "train"`
@@ -427,6 +429,8 @@ def calibration_fingerprint(cfg: AppConfig) -> str  # config_fingerprint(cfg, "c
   (`requires_neural`, ревизии закреплены, = default.yaml по отпечатку; проверяет `tests/test_configs.py`).
 - API: `AskResponse.abstain_score` (null без классификатора), `/health` → `abstention_method`, `abstention_decision_threshold` (порог модели). CLI: `build-train`,
   `train-abstention [--model auto|logreg|catboost] [--out]`; `eval --save-calibration` при `method: classifier` → код 1.
+  Запасной порог такого конфига пересчитывают с `KBRAG_ABSTENTION_METHOD=threshold` (`make eval … METHOD=threshold`):
+  отпечаток калибровки — только `chunking`, `retrieval`, `rerank`, поэтому сервис с классификатором его примет.
 - Инфраструктура: `reports/abstention*.json` и `reports/abstention*.cbm` — в git и в Docker-образе (как калибровка);
   extra `classic = ["catboost>=1.2"]`, catboost также в `dev` (CI ставит `.[dev]`).
 

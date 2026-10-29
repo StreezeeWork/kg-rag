@@ -647,7 +647,7 @@ flowchart LR
 1. значения по умолчанию в `AppConfig`;
 2. YAML-файл;
 3. `overrides` — словарь, которым сетка экспериментов меняет отдельные поля;
-4. переменные окружения `KBRAG_GENERATION_BACKEND`, `KBRAG_LLM_BASE_URL`, `KBRAG_LLM_MODEL`, `KBRAG_LLM_TIMEOUT_S`, `KBRAG_LLM_MAX_TOKENS`, `KBRAG_CORPUS_DIR` (словарь `_ENV_OVERRIDES` в том же файле).
+4. переменные окружения `KBRAG_GENERATION_BACKEND`, `KBRAG_LLM_BASE_URL`, `KBRAG_LLM_MODEL`, `KBRAG_LLM_TIMEOUT_S`, `KBRAG_LLM_MAX_TOKENS`, `KBRAG_CORPUS_DIR`, `KBRAG_ABSTENTION_METHOD` (словарь `_ENV_OVERRIDES` в том же файле).
 
 **Какой файл конфига будет взят:**
 
@@ -5012,12 +5012,12 @@ CitationPrecision 0.653 и 0.653 (генератор тот же). Класси�
 каталог `reports/` в git не попадает. Как повторить — ниже.
 
 > **Потрогать руками** Нужны нейросетевые модели (`make install-neural`) и два прогона по 10–15 минут на CPU.
-> Сначала сами прогоны, порог — через временную копию конфига (`reports/` в git не попадает):
+> Сначала сами прогоны. Порог — тот же конфиг, способ отказа переключает переменная `KBRAG_ABSTENTION_METHOD`
+> (без `--save-calibration` она ничего не перезаписывает):
 >
 > ```bash
 > kbrag eval --config configs/default.yaml --name default_classifier --out reports/cmp_neural
-> sed 's/^  method: classifier/  method: threshold/' configs/default.yaml > reports/default_threshold.yaml
-> kbrag eval --config reports/default_threshold.yaml --name default_threshold --out reports/cmp_neural
+> KBRAG_ABSTENTION_METHOD=threshold kbrag eval --config configs/default.yaml --name default_threshold --out reports/cmp_neural
 > ```
 >
 > Затем сравнение по id вопроса:
@@ -5368,11 +5368,10 @@ Docker-образ ставит `.[neural,classic]` (коммит `2c2de85`: бе
 > # None
 > ```
 >
-> И офлайн-классификатор в деле, через временную копию конфига (`reports/` в git не попадает):
+> И офлайн-классификатор в деле: тот же `configs/offline.yaml`, способ отказа переключает переменная окружения.
 >
 > ```bash
-> sed 's/^  method: threshold/  method: classifier/' configs/offline.yaml > reports/offline_clf.yaml
-> kbrag ask "Сколько дней ежегодного отпуска положено сотруднику?" --config reports/offline_clf.yaml
+> KBRAG_ABSTENTION_METHOD=classifier kbrag ask "Сколько дней ежегодного отпуска положено сотруднику?" --config configs/offline.yaml
 > # В базе знаний нет ответа на этот вопрос.
 > #
 > # Отказ: да (классификатор отказа)
@@ -5387,9 +5386,11 @@ Docker-образ ставит `.[neural,classic]` (коммит `2c2de85`: бе
 > больше не ловится, видно только по Abstention recall. Проверка — `GET /health`: должно быть
 > `"abstention_method": "classifier:catboost"`; `"threshold"` вместе с `"abstention_threshold": null` значит, что
 > сервис не отказывается совсем. Лечение: переобучить модель (`kbrag train-abstention --config configs/default.yaml`)
-> и пересчитать запасной порог. Для второго нужна временная копия конфига с `abstention.method: threshold` и
-> `kbrag eval … --save-calibration`: при `method: classifier` флаг `--save-calibration` завершает команду с кодом
-> 1. Оба файла коммитят вместе с изменением поиска.
+> и пересчитать запасной порог: `make eval CONFIG=configs/default.yaml NAME=neural_threshold METHOD=threshold`.
+> `METHOD=threshold` превращается в переменную `KBRAG_ABSTENTION_METHOD=threshold`: при `method: classifier` флаг
+> `--save-calibration` завершает команду с кодом 1, ведь порог классификатора живёт в файле модели. Почему
+> запасной порог, посчитанный «с другим методом», сервис примет: отпечаток калибровки строится по `chunking`,
+> `retrieval` и `rerank`, а способ отказа в него не входит. Оба файла коммитят вместе с изменением поиска.
 
 ### 9.11 Честные ограничения и что делать дальше
 
@@ -5744,12 +5745,13 @@ kbrag eval --config configs/offline.yaml --name ci --save-calibration \
 | `KBRAG_CORPUS_DIR` | конфиг | другой каталог с документами |
 | `KBRAG_GENERATION_BACKEND`, `KBRAG_LLM_BASE_URL`, `KBRAG_LLM_MODEL` | конфиг | включить генерацию через LLM без правки YAML |
 | `KBRAG_LLM_TIMEOUT_S`, `KBRAG_LLM_MAX_TOKENS` | конфиг | поднять лимиты для медленной локальной LLM без правки YAML (6.4) |
+| `KBRAG_ABSTENTION_METHOD` | конфиг | `threshold` или `classifier` поверх `abstention.method`: пересчитать запасной порог нейроконфига, сравнить методы отказа (9.8, 9.10) |
 | `LLM_API_KEY` | клиент LLM | сам ключ; в YAML хранится только **имя** этой переменной (`api_key_env`) |
 | `KBRAG_ALLOWED_HOSTS`, `KBRAG_LOG_LEVEL` | сервис | допустимые заголовки Host, уровень логов |
 | `HF_HOME` | Hugging Face | куда скачивать модели |
 | `KBRAG_RUN_NEURAL` | тесты | включить нейросетевые тесты |
 
-Шаблон основных переменных — [.env.example](.env.example); двух лимитов LLM (`KBRAG_LLM_TIMEOUT_S`, `KBRAG_LLM_MAX_TOKENS`) в нём пока нет. Полный список переопределений конфига — словарь `_ENV_OVERRIDES` в [src/kbrag/config.py](src/kbrag/config.py).
+Шаблон переменных сервиса — [.env.example](.env.example). `KBRAG_ABSTENTION_METHOD` в нём нарочно нет: это переменная для разовых прогонов оценки, а оставленная в `.env`, она тихо поменяла бы способ отказа у сервиса. Полный список переопределений конфига — словарь `_ENV_OVERRIDES` в [src/kbrag/config.py](src/kbrag/config.py).
 
 > **Почему так?**
 > - **Переменные окружения сильнее YAML.** Так один и тот же образ можно запускать с разными настройками в Docker и CI, не пересобирая его. Пустое значение не перекрывает YAML, потому что compose передаёт незаданные переменные именно пустыми строками.
