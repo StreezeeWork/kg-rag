@@ -607,7 +607,8 @@ def _calibration_not_saveable(cfg: AppConfig) -> str | None:
     if abstention.method == "classifier":
         return (
             "abstention.method: classifier — порог хранится в файле модели отказа "
-            "(kbrag train-abstention), калибровка по уверенности не подбирается"
+            "(kbrag train-abstention), калибровка по уверенности не подбирается. "
+            "Запасной порог по уверенности пересчитывает тот же запуск с KBRAG_ABSTENTION_METHOD=threshold"
         )
     if abstention.threshold != "auto":
         return (

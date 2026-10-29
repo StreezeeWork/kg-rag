@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import replace
@@ -19,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from kbrag.abstention import FEATURE_NAMES, AbstentionModel, LogRegParams, extract_features
 from kbrag.api.app import build_ask_response, create_app
-from kbrag.cli import EXIT_ERROR, main
+from kbrag.cli import EXIT_ERROR, EXIT_OK, main
 from kbrag.config import AppConfig, deep_merge
 from kbrag.eval import runner
 from kbrag.eval.dataset import GoldItem, item_from_record, items_fingerprint
@@ -321,4 +322,36 @@ def test_eval_save_calibration_is_refused_for_classifier(
     path = tmp_path / "clf.yaml"
     path.write_text(yaml.safe_dump(config.model_dump(mode="json"), allow_unicode=True), encoding="utf-8")
     assert main(["eval", "--config", str(path), "--save-calibration"]) == EXIT_ERROR
-    assert "train-abstention" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "train-abstention" in err
+    assert "KBRAG_ABSTENTION_METHOD=threshold" in err  # подсказка, как пересчитать запасной порог
+
+
+def test_fallback_threshold_of_classifier_config_is_saved_with_env_method(
+    tmp_path: Path,
+    mini_corpus_dir: Path,
+    mini_gold_records: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Регрессия: после переключения configs/default.yaml на классификатор `make eval` для него завершался
+    # с кодом 1, и запасной порог reports/calibration.json было нечем пересчитать.
+    gold_path = tmp_path / "gold.jsonl"
+    records = [*mini_gold_records, DEV_UNANSWERABLE]
+    gold_path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records), encoding="utf-8")
+    cfg = make_cfg(
+        tmp_path, corpus_dir=str(mini_corpus_dir), gold_path=str(gold_path), abstention={"threshold": "auto"}
+    )
+    path = tmp_path / "clf.yaml"
+    path.write_text(yaml.safe_dump(cfg.model_dump(mode="json"), allow_unicode=True), encoding="utf-8")
+
+    monkeypatch.setenv("KBRAG_ABSTENTION_METHOD", "threshold")
+    args = ["eval", "--config", str(path), "--out", str(tmp_path / "reports"), "--save-calibration"]
+    assert main(args) == EXIT_OK
+    assert Path(cfg.abstention.calibration_path).is_file()
+
+    # Сервис с тем же конфигом (метод — классификатор), но без файла модели принимает этот порог:
+    # отпечаток калибровки от способа отказа не зависит. Корпус — тот же каталог, что читала оценка.
+    monkeypatch.delenv("KBRAG_ABSTENTION_METHOD")
+    pipeline = RAGPipeline.from_config(cfg)
+    assert pipeline.abstention_method == "threshold"
+    assert pipeline.threshold is not None

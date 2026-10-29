@@ -171,6 +171,10 @@ _ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "KBRAG_LLM_TIMEOUT_S": ("generation", "timeout_s"),
     "KBRAG_LLM_MAX_TOKENS": ("generation", "max_tokens"),
     "KBRAG_CORPUS_DIR": ("corpus_dir",),
+    # Запасной порог конфига с классификатором отказа пересчитывают тем же конфигом, но с порогом:
+    # KBRAG_ABSTENTION_METHOD=threshold kbrag eval --config configs/default.yaml --save-calibration.
+    # Отпечаток калибровки от способа отказа не зависит, поэтому сервис с классификатором этот порог примет.
+    "KBRAG_ABSTENTION_METHOD": ("abstention", "method"),
 }
 
 

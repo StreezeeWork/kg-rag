@@ -2,7 +2,7 @@
 #
 # На Windows запускайте из Git Bash (make можно поставить: `choco install make` или `winget install GnuWin32.Make`).
 # Любую переменную ниже можно переопределить в командной строке:
-#   make eval CONFIG=configs/default.yaml NAME=neural
+#   make eval CONFIG=configs/default.yaml NAME=neural_threshold METHOD=threshold
 #   make test PYTHON=.venv/Scripts/python
 
 # Интерпретатор Python (по умолчанию — тот, что первый в PATH; удобно активировать venv заранее).
@@ -11,6 +11,9 @@ PYTHON ?= python
 CONFIG ?= configs/offline.yaml
 # Имя прогона оценки: под ним результат появится в reports/.
 NAME ?= offline
+# Способ отказа для eval: пусто — из конфига. В configs/default.yaml отказывает классификатор, а его порог
+# хранится в файле модели, поэтому запасной порог по уверенности (reports/calibration.json) считают с METHOD=threshold.
+METHOD ?=
 # Файл сетки экспериментов и дополнительные флаги для неё.
 EXPERIMENTS ?= configs/experiments.yaml
 GRID_ARGS ?=
@@ -61,8 +64,9 @@ data: ## Собрать data/eval/gold.jsonl из data/eval/parts и прове�
 # конфига (offline → reports/calibration_offline.json, default → reports/calibration.json).
 # Этот файл читает сервис: без него `make serve` и Docker-образ никогда не отказываются от ответа.
 # Файлы калибровки лежат в git — после изменения поиска, корпуса или эталона закоммитьте обновлённый.
-eval: ## Оценить конфиг и сохранить порог отказа для сервиса: make eval CONFIG=configs/default.yaml NAME=neural
-	$(PYTHON) -m kbrag eval --config $(CONFIG) --name $(NAME) --save-calibration
+# Для configs/default.yaml (отказ — классификатор) нужен METHOD=threshold: иначе kbrag eval завершится с кодом 1.
+eval: ## Оценить конфиг и сохранить порог отказа для сервиса (нейро: CONFIG=configs/default.yaml METHOD=threshold)
+	KBRAG_ABSTENTION_METHOD=$(METHOD) $(PYTHON) -m kbrag eval --config $(CONFIG) --name $(NAME) --save-calibration
 
 grid: ## Прогнать сетку экспериментов → reports/grid/leaderboard.md (GRID_ARGS="--include-heavy")
 	$(PYTHON) -m kbrag grid --experiments $(EXPERIMENTS) $(GRID_ARGS)

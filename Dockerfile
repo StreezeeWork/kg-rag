@@ -56,11 +56,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Из data/ в образ попадает только корпус: эталон data/eval сервису не нужен (см. .dockerignore).
 COPY configs ./configs
 COPY data ./data
-# Из reports/ в образ попадают только файлы калибровки порога отказа (см. .dockerignore).
-# reports/calibration_offline.json лежит в git, поэтому офлайн-образ даже из свежего клона сразу
-# умеет отвечать «нет ответа». Для configs/default.yaml порог появится после
-# `make eval CONFIG=configs/default.yaml NAME=neural` (reports/calibration.json) и пересборки образа.
-# Порог не подхватился — GET /health покажет "abstention_threshold": null.
+# Из reports/ в образ попадают только файлы калибровки порога отказа и модели отказа (см. .dockerignore).
+# Они лежат в git, поэтому образ даже из свежего клона сразу умеет отвечать «нет ответа»:
+# офлайн — по порогу reports/calibration_offline.json, нейро — по классификатору reports/abstention_default.json
+# (+ .cbm; запасной порог — reports/calibration.json). После правки поиска или корпуса их пересчитывают
+# (`kbrag train-abstention`, `make eval`) и пересобирают образ.
+# Не подхватилось — GET /health покажет "abstention_method": "threshold" и "abstention_threshold": null.
 COPY reports/ ./reports/
 
 # Каталоги, куда сервис пишет во время работы (кэш моделей и эмбеддингов, отчёты), принадлежат app.

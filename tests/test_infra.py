@@ -70,6 +70,8 @@ def git_ignores(path: str) -> bool:
 def test_make_eval_saves_calibration() -> None:
     # Без флага `make eval` не пишет порог, и сервис после `make serve` никогда не отказывается.
     assert "--save-calibration" in make_recipe("eval")
+    # Для конфига с классификатором отказа запасной порог считают с METHOD=threshold (configs/default.yaml).
+    assert "KBRAG_ABSTENTION_METHOD=$(METHOD)" in make_recipe("eval")
 
 
 def test_calibration_is_committed_but_scratch_reports_are_not() -> None:
@@ -339,6 +341,17 @@ def test_llm_limits_can_be_raised_from_env(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert cfg.generation.timeout_s == 180.0
     assert cfg.generation.max_tokens == 256
+
+
+def test_abstention_method_can_be_switched_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Так пересчитывают запасной порог конфига с классификатором, не копируя YAML.
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setenv("KBRAG_ABSTENTION_METHOD", "threshold")
+    assert load_config("configs/default.yaml").abstention.method == "threshold"
+
+    monkeypatch.setenv("KBRAG_ABSTENTION_METHOD", "treshold")  # опечатка — ошибка сразу, а не тихий откат
+    with pytest.raises(ValueError, match="method"):
+        load_config("configs/default.yaml")
 
 
 def test_empty_env_value_keeps_yaml(monkeypatch: pytest.MonkeyPatch) -> None:

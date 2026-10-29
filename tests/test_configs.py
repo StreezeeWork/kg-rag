@@ -118,6 +118,9 @@ def test_calibration_hint_in_config_mentions_save_flag(name: str) -> None:
     ]
     assert hints, "в конфиге должна быть подсказка, как откалибровать порог для сервиса"
     assert all("--save-calibration" in line for line in hints)
+    # При method: classifier `--save-calibration` без переменной завершается с кодом 1.
+    if load_config(CONFIGS / name).abstention.method == "classifier":
+        assert all("KBRAG_ABSTENTION_METHOD=threshold" in line for line in hints)
 
 
 @pytest.mark.parametrize("section", ["generation", "judge"])
