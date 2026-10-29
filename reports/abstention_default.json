@@ -1,0 +1,265 @@
+{
+  "format_version": 1,
+  "model_type": "catboost",
+  "feature_names": [
+    "bm25_top1",
+    "bm25_top2",
+    "bm25_gap",
+    "bm25_mean",
+    "bm25_top1_per_term",
+    "dense_top1",
+    "dense_top2",
+    "dense_gap",
+    "dense_mean",
+    "rerank_top1",
+    "rerank_top2",
+    "rerank_gap",
+    "rerank_mean",
+    "bm25_dense_same_top1",
+    "n_docs",
+    "archived_share",
+    "q_len",
+    "q_cov_top1",
+    "q_cov_topk",
+    "q_has_digits"
+  ],
+  "decision_threshold": 0.6185439992039621,
+  "params": {
+    "depth": 4
+  },
+  "fingerprint": "165ae5eef307",
+  "corpus_sha256": "be5fe72bcb47f3a6",
+  "train_sha256": "56e8df2f76d8f245",
+  "dev_sha256": "1527eeb22fe7cd8c",
+  "baseline_feature": "dense_top1",
+  "cv_report": {
+    "chosen": "catboost depth=4",
+    "beats_baseline_cv": true,
+    "candidates": [
+      {
+        "name": "baseline: dense_top1",
+        "model_type": "baseline",
+        "params": {
+          "feature": "dense_top1"
+        },
+        "complexity": 0,
+        "roc_auc_mean": 0.7395833333333333,
+        "roc_auc_std": 0.05428193146867759,
+        "pr_auc_mean": 0.6674173474530117,
+        "pr_auc_std": 0.05556064650348108,
+        "n_folds": 15
+      },
+      {
+        "name": "logreg C=0.1",
+        "model_type": "logreg",
+        "params": {
+          "C": 0.1
+        },
+        "complexity": 1,
+        "roc_auc_mean": 0.7636574074074074,
+        "roc_auc_std": 0.04579172794969042,
+        "pr_auc_mean": 0.7137078009730224,
+        "pr_auc_std": 0.04266543496331409,
+        "n_folds": 15
+      },
+      {
+        "name": "logreg C=1",
+        "model_type": "logreg",
+        "params": {
+          "C": 1.0
+        },
+        "complexity": 2,
+        "roc_auc_mean": 0.766898148148148,
+        "roc_auc_std": 0.04354594992701446,
+        "pr_auc_mean": 0.7088079017893719,
+        "pr_auc_std": 0.046970016986085994,
+        "n_folds": 15
+      },
+      {
+        "name": "logreg C=10",
+        "model_type": "logreg",
+        "params": {
+          "C": 10.0
+        },
+        "complexity": 3,
+        "roc_auc_mean": 0.7711419753086418,
+        "roc_auc_std": 0.04532814302939372,
+        "pr_auc_mean": 0.7062747126594543,
+        "pr_auc_std": 0.047765201809976995,
+        "n_folds": 15
+      },
+      {
+        "name": "catboost depth=2",
+        "model_type": "catboost",
+        "params": {
+          "depth": 2
+        },
+        "complexity": 4,
+        "roc_auc_mean": 0.7707561728395063,
+        "roc_auc_std": 0.04374472150720172,
+        "pr_auc_mean": 0.7210076017459109,
+        "pr_auc_std": 0.051724113610041395,
+        "n_folds": 15
+      },
+      {
+        "name": "catboost depth=3",
+        "model_type": "catboost",
+        "params": {
+          "depth": 3
+        },
+        "complexity": 5,
+        "roc_auc_mean": 0.7768518518518519,
+        "roc_auc_std": 0.044756127124092764,
+        "pr_auc_mean": 0.7206563858694082,
+        "pr_auc_std": 0.052861073280102595,
+        "n_folds": 15
+      },
+      {
+        "name": "catboost depth=4",
+        "model_type": "catboost",
+        "params": {
+          "depth": 4
+        },
+        "complexity": 6,
+        "roc_auc_mean": 0.7850308641975309,
+        "roc_auc_std": 0.037477402994183735,
+        "pr_auc_mean": 0.7222080128582902,
+        "pr_auc_std": 0.05448433507143499,
+        "n_folds": 15
+      }
+    ]
+  },
+  "dev_metrics": {
+    "classifier": {
+      "auroc": 0.9214285714285714,
+      "auroc_ci95": [
+        0.8452083333333333,
+        0.9785714285714285
+      ],
+      "threshold": 0.6185439992039621,
+      "balanced_accuracy": 0.8886904761904761,
+      "abstain_precision": 0.7222222222222222,
+      "abstain_recall": 0.8666666666666667,
+      "abstain_f1": 0.7878787878787877,
+      "false_abstention_rate": 0.08928571428571429
+    },
+    "baseline": {
+      "auroc": 0.7928571428571428,
+      "auroc_ci95": [
+        0.6845238095238095,
+        0.8916666666666667
+      ],
+      "threshold": 0.8712671101093292,
+      "balanced_accuracy": 0.7678571428571428,
+      "abstain_precision": 0.36585365853658536,
+      "abstain_recall": 1.0,
+      "abstain_f1": 0.5357142857142857,
+      "false_abstention_rate": 0.4642857142857143
+    },
+    "auroc_diff": {
+      "value": 0.12857142857142856,
+      "ci95": [
+        0.022619047619047646,
+        0.23571428571428565
+      ]
+    },
+    "beats_baseline_dev": true
+  },
+  "importance": {
+    "kind": "mean_abs_shap",
+    "values": [
+      [
+        "dense_mean",
+        0.7881223813127887
+      ],
+      [
+        "rerank_gap",
+        0.7340463323507322
+      ],
+      [
+        "dense_top1",
+        0.39371595334427717
+      ],
+      [
+        "dense_top2",
+        0.36174373451664
+      ],
+      [
+        "rerank_top1",
+        0.2623958028309191
+      ],
+      [
+        "dense_gap",
+        0.21735277717157633
+      ],
+      [
+        "bm25_top2",
+        0.20228943736940747
+      ],
+      [
+        "q_cov_topk",
+        0.17781206821736414
+      ],
+      [
+        "rerank_mean",
+        0.17010448192874586
+      ],
+      [
+        "bm25_top1_per_term",
+        0.16394468264029569
+      ],
+      [
+        "q_cov_top1",
+        0.1527863710816561
+      ],
+      [
+        "bm25_mean",
+        0.15196850776806786
+      ],
+      [
+        "bm25_gap",
+        0.14526241220595684
+      ],
+      [
+        "q_len",
+        0.14469573035356684
+      ],
+      [
+        "n_docs",
+        0.14075805682911913
+      ],
+      [
+        "rerank_top2",
+        0.13959558058562702
+      ],
+      [
+        "bm25_top1",
+        0.0939504829795489
+      ],
+      [
+        "q_has_digits",
+        0.08679126419779225
+      ],
+      [
+        "archived_share",
+        0.06080968007854717
+      ],
+      [
+        "bm25_dense_same_top1",
+        0.012428748263374445
+      ]
+    ]
+  },
+  "created_at": "2026-10-29T00:11:22+00:00",
+  "versions": {
+    "python": "3.12.10",
+    "kbrag": "0.1.0",
+    "numpy": "2.5.4",
+    "scikit-learn": "1.9.1",
+    "catboost": "1.2.10"
+  },
+  "catboost": {
+    "file": "abstention_default.cbm",
+    "sha256": "c215d3b6188e17b5c1df1c07ed3e6b1caa3f13aa0b6bf76700845588a28178b1"
+  }
+}
