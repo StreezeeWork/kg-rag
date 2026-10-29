@@ -1,6 +1,18 @@
-# Классификатор отказа против порога: эксперимент на офлайн-конфиге
+# Классификатор отказа против порога
 
-**Итог.** Классификатор отказа (логистическая регрессия на 20 признаках выдачи) на dev **не лучше**
+**Коротко.** Один и тот же подход дал два разных результата — и оба решения приняты по dev:
+
+| Конфиг | Победитель на dev | Что в сервисе | Подробности |
+|---|---|---|---|
+| `offline.yaml` (BM25 + LSA) | порог: BA 0.760 против 0.723 | `method: threshold` | разделы 1–8 |
+| `default.yaml` (BM25 + e5 + реранкер) | **классификатор**: BA 0.889 против 0.768, AUROC 0.921 против 0.793 | `method: classifier` | раздел 9 |
+
+Почему так: у классификатора с e5 и реранкером есть сигналы, которых нет у офлайн-поиска (разрыв оценок
+реранкера между первым и вторым фрагментом, косинус e5), и синтетические обучающие вопросы для них
+«трудны» гораздо меньше. На test нейросетевой классификатор отказывается зря в 4.6% случаев против 35% у
+порога, а сквозной FactRecall растёт с 0.523 до 0.667.
+
+**Итог по офлайн-конфигу.** Классификатор отказа (логистическая регрессия на 20 признаках выдачи) на dev **не лучше**
 нынешнего порога по одной уверенности поиска: AUROC 0.677 против 0.738, balanced accuracy 0.723 против
 0.760; при одинаковом числе отказов на dev порог ловит больше вопросов без ответа — 11 из 15 против 7
 (раздел 4). Поэтому `configs/offline.yaml` остаётся на `abstention.method: threshold`. Test (на нём ничего
@@ -383,15 +395,91 @@ F1 не учитывает отвечаемые вопросы, которые �
 3. Признаки из индекса (например, есть ли в вопросе слово, которого нет нигде в корпусе). Сейчас
    правило разрешает только выдачу поиска и текст вопроса.
 
-## 9. Нейросетевой конфиг
+## 9. Нейросетевой конфиг (BM25 + e5 + реранкер)
 
-*Будет добавлено после прогона.* Модель для `configs/default.yaml` (e5 + реранкер) ещё не обучена:
-на CPU прогон занимает больше 10 минут. Команды:
+**Правило решения записано до обучения** — коммит `8029af0` в `docs/DESIGN.md`: переключаемся на
+классификатор, только если на dev одновременно (а) balanced accuracy выше, (б) AUROC не ниже и (в) при
+одинаковом числе отказов (рабочая точка порога) поймано не меньше вопросов без ответа. В офлайн-части
+правило жило только в задании эксперимента (раздел 4); здесь его заранее зафиксировала история git.
+
+### Кросс-валидация на train (15 фолдов, mean ± std)
+
+| Кандидат | ROC-AUC | PR-AUC |
+|---|---:|---:|
+| бейзлайн `dense_top1` | 0.740 ± 0.054 | 0.667 ± 0.056 |
+| logreg C=0.1 / 1 / 10 | 0.764 / 0.767 / 0.771 | 0.714 / 0.709 / 0.706 |
+| catboost depth=2 / 3 | 0.771 / 0.777 | 0.721 / 0.721 |
+| **catboost depth=4 (выбрана)** | **0.785 ± 0.037** | 0.722 ± 0.054 |
+
+Разница между кандидатами меньше одного std — выбор CatBoost здесь почти «монетка» по CV. Решает не он,
+а сравнение с порогом на dev ниже. Обратите внимание на бейзлайн: на train у e5 AUROC 0.74 — в 1.4 раза
+выше, чем у LSA (0.53, раздел 2). Синтетические «почти попадания» трудны для поиска по буквам, но
+нейросетевой поиск их отличает заметно лучше, поэтому сдвиг train → dev здесь меньше мешает.
+
+### Решение на dev (56 с ответом + 15 без)
+
+| Метрика | Порог (`dense`, 0.871) | Классификатор (p ≥ 0.619) | Разница [95% ДИ] |
+|---|---:|---:|---:|
+| AUROC | 0.793 | **0.921** | +0.129 [+0.023; +0.236] |
+| Balanced accuracy | 0.768 | **0.889** | +0.121 [+0.010; +0.223] |
+| Отказов | 41 | 18 | |
+| Поймано без ответа / зря отказано | 15/15 и 26/56 | 13/15 и 5/56 | |
+| FAR | 0.464 | **0.089** | |
+| FactRecall (сквозной) | 0.491 | **0.696** | +0.205 [+0.107; +0.304] |
+
+Правило: (а) ✅ BA выше; (б) ✅ AUROC выше; (в) ✅ при 41 отказе (точка порога) классификатор ловит
+15/15 — столько же. При 18 отказах (точка классификатора) он ловит 13/15, а порог — 7/15. **Решение:
+`configs/default.yaml` → `method: classifier`** (коммит `5f5080c`).
+
+### Test — только отчёт (131 с ответом + 35 без)
+
+| Метрика | Порог | Классификатор | Разница [95% ДИ] |
+|---|---:|---:|---:|
+| AUROC | 0.796 | **0.871** | +0.075 [+0.008; +0.140] |
+| Balanced accuracy | 0.753 | 0.777 | +0.024 [−0.060; +0.104] |
+| Отказов | 76 | 27 | |
+| Поймано без ответа / зря отказано | 30/35 и 46/131 | 21/35 и 6/131 | |
+| FAR | 0.351 | **0.046** | |
+| FactRecall (сквозной) | 0.523 | **0.667** | +0.144 [+0.092; +0.205] |
+| При 27 отказах: поймано | 14/35 | **21/35** | |
+| Recall@5 | 0.903 | 0.903 | выдача одинаковая |
+
+Как читать:
+
+- **Ранжирование лучше, и это значимо** (интервал разницы AUROC не включает 0): классификатор лучше
+  отличает вопросы без ответа от отвечаемых.
+- **Рабочая точка сдвинута к «отвечать»**: в своей точке он ловит меньше вопросов без ответа (21/35
+  против 30/35), зато почти не отказывает зря (6 против 46). Для сервиса это удачный обмен: каждый зря
+  отклонённый вопрос — недовольный пользователь, а сквозной FactRecall растёт на 0.14.
+- **Balanced accuracy на test неотличима** (интервал включает 0): при сравнении в разных рабочих
+  точках BA сглаживает разницу. Сравнение при равном числе отказов (27) показывает её явно.
+
+### Почему признаки работают
+
+Средний |SHAP| (на сколько признак в среднем сдвигает логит): `dense_mean` 0.79, **`rerank_gap` 0.73**,
+`dense_top1` 0.39, `dense_top2` 0.36, `rerank_top1` 0.26, `dense_gap` 0.22. Самый «новый» сигнал —
+`rerank_gap`: если реранкер уверенно ставит один фрагмент далеко впереди остальных, ответ, скорее всего,
+есть; если оценки у всех фрагментов близки, поиск «не нашёл главного». В офлайн-конфиге реранкера нет,
+поэтому этого сигнала там не было вовсе.
+
+### Ограничения
+
+- Dev маленький (15 вопросов без ответа); порог классификатора 0.619 подобран на нём и шумный.
+- Train синтетический; AUROC на CV (0.785) ниже, чем на dev (0.921): эталонные вопросы без ответа
+  «легче» синтетических, как и в офлайн-части. На вопросах настоящих пользователей цифры могут быть другими.
+- Модель привязана к поиску и корпусу (`fingerprint`, `corpus_sha256`) и требует `catboost`
+  (`pip install -e .[classic]`); без файла модели сервис откатывается на порог с предупреждением.
+
+### Как воспроизвести (~40 мин на CPU)
 
 ```bash
-kbrag train-abstention --config configs/default.yaml   # → reports/abstention_default.json
-kbrag grid --only hybrid_bm25_e5_rerank hybrid_bm25_e5_rerank_clf --out reports/abstention_cmp_neural
+kbrag train-abstention --config configs/default.yaml                     # CV, порог на dev → reports/abstention_default.json (+ .cbm)
+kbrag eval --config configs/default.yaml --name default_classifier --out reports/abstention_cmp_neural
 ```
+
+Сравнение с порогом в таблицах выше получено прогоном того же поиска с `method: threshold`
+(`reports/abstention_cmp_neural/default_threshold`) и шагом сетки `hybrid_bm25_e5_rerank_clf`; парные
+разности — тем же кодом, что в конце документа. Код коммита 8029af0, CPU AMD Ryzen 5 2600X.
 
 ---
 
@@ -497,14 +585,24 @@ X_no_digits[:, digits] = 0.0
 p_no_digits = model.predict_proba(X_no_digits)
 numeric = [i for i, item in enumerate(dev) if item.qtype == "numeric"]
 refused = [i for i in numeric if model.abstains(p[i])]
-print("numeric:", len(numeric), "с цифрами:", int(X_dev[numeric, digits].sum()), "отказов:", len(refused),
-      "станут ответом:", sum(not model.abstains(p_no_digits[i]) for i in refused))
+print(
+    "numeric:",
+    len(numeric),
+    "с цифрами:",
+    int(X_dev[numeric, digits].sum()),
+    "отказов:",
+    len(refused),
+    "станут ответом:",
+    sum(not model.abstains(p_no_digits[i]) for i in refused),
+)
 print("порог", round(model.decision_threshold, 3), "средняя p на dev", round(float(p.mean()), 3))
 
 # 2. Абляция — только диагностика, признаки по ней не выбираем: logreg без q_has_digits, train-CV и dev
 folds = RepeatedStratifiedKFold(n_splits=5, n_repeats=3, random_state=0)  # те же 15 разбиений, что в обучении
-for name, cols in (("все признаки", list(range(len(FEATURE_NAMES)))),
-                   ("без q_has_digits", [j for j in range(len(FEATURE_NAMES)) if j != digits])):
+for name, cols in (
+    ("все признаки", list(range(len(FEATURE_NAMES)))),
+    ("без q_has_digits", [j for j in range(len(FEATURE_NAMES)) if j != digits]),
+):
     estimator = make_estimator("logreg", {"C": 1.0})
     cv = cross_val_score(estimator, X_tr[:, cols], y_tr, cv=folds, scoring="roc_auc").mean()
     p_dev = estimator.fit(X_tr[:, cols], y_tr).predict_proba(X_dev[:, cols])[:, 1]
@@ -550,13 +648,18 @@ risk = {
 for n in (sum(thr[q]["abstained"] for q in qids), sum(clf[q]["abstained"] for q in qids)):
     for name, r in risk.items():
         top = np.argsort(-r, kind="stable")[:n]
-        print(f"(a) отказов {n}: {name:13s} поймано {(~is_answerable[top]).sum()}/{(~is_answerable).sum()}, "
-              f"зря {is_answerable[top].sum()}/{is_answerable.sum()}")
+        print(
+            f"(a) отказов {n}: {name:13s} поймано {(~is_answerable[top]).sum()}/{(~is_answerable).sum()}, "
+            f"зря {is_answerable[top].sum()}/{is_answerable.sum()}"
+        )
 
 
 def logreg(class_weight, cols):
-    est = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(),
-                        LogisticRegression(C=1.0, class_weight=class_weight))
+    est = make_pipeline(
+        SimpleImputer(strategy="median"),
+        StandardScaler(),
+        LogisticRegression(C=1.0, class_weight=class_weight),
+    )
     return est.fit(X_tr[:, cols], y_tr)
 
 
@@ -567,10 +670,17 @@ for w, p_dev in p_w.items():
     conf = list(1 - p_dev)
     t = choose_threshold(conf, answerable)
     print(f"(b) class_weight={w}: отказов на dev {sum(c < t for c in conf)}")
-print(f"(b) ранговая корреляция p (balanced vs без весов): {spearmanr(p_w['balanced'], p_w[None]).statistic:.3f}")
+print(
+    f"(b) ранговая корреляция p (balanced vs без весов): {spearmanr(p_w['balanced'], p_w[None]).statistic:.3f}"
+)
 
 # (c) Знак коэффициента: признак в одиночку и в паре со связанным с ним признаком BM25.
-for names in (["dense_top1"], ["dense_top1", "bm25_top1_per_term"], ["dense_mean"], ["dense_mean", "bm25_mean"]):
+for names in (
+    ["dense_top1"],
+    ["dense_top1", "bm25_top1_per_term"],
+    ["dense_mean"],
+    ["dense_mean", "bm25_mean"],
+):
     coef = logreg("balanced", [FEATURE_NAMES.index(n) for n in names])[-1].coef_[0]
     print("(c)", ", ".join(f"{n} {w:+.2f}" for n, w in zip(names, coef, strict=True)))
 ```
