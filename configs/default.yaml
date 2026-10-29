@@ -70,8 +70,11 @@ generation:
 
 abstention:
   enabled: true         # отказываемся отвечать, если поиск не уверен: выдумка хуже честного «не знаю»
-  method: threshold     # threshold — порог по уверенности; classifier — модель отказа (`kbrag train-abstention
-                        # --config configs/default.yaml`). Переключать — по итогам эксперимента hybrid_bm25_e5_rerank_clf на dev
+  method: classifier    # модель отказа (CatBoost на 20 признаках выдачи; `kbrag train-abstention --config
+                        # configs/default.yaml`). Решение по правилу из docs/DESIGN.md, записанному ДО обучения: на dev
+                        # balanced accuracy 0.889 против 0.768 у порога, AUROC 0.921 против 0.793, при равном числе
+                        # отказов ловит не меньше. Test — только отчёт: docs/results/abstention.md, раздел 9.
+                        # Нужен catboost (`pip install -e .[classic]`); нет файла модели — откат на порог ниже.
   threshold: auto       # порог подбирается на dev; сервису его сохраняет `make eval CONFIG=configs/default.yaml NAME=neural`
                         # (то же: `kbrag eval --config configs/default.yaml --save-calibration`; без флага файла не будет,
                         # и сервис будет отвечать без отказов по порогу)

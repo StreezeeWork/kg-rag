@@ -80,11 +80,16 @@ def test_chunking_steps_of_the_grid_really_change_the_chunks() -> None:
 
 
 @pytest.mark.parametrize(
-    ("experiment", "service_config"),
-    [("hybrid_bm25_lsa_clf", "offline.yaml"), ("hybrid_bm25_e5_rerank_clf", "default.yaml")],
+    ("experiment", "service_config", "served_method"),
+    [
+        # Офлайн: на dev классификатор хуже порога — остаётся порог (docs/results/abstention.md, раздел 4).
+        ("hybrid_bm25_lsa_clf", "offline.yaml", "threshold"),
+        # Нейро: правило из docs/DESIGN.md, записанное до обучения, на dev выполнено — сервис на классификаторе.
+        ("hybrid_bm25_e5_rerank_clf", "default.yaml", "classifier"),
+    ],
 )
 def test_classifier_experiments_match_the_config_their_model_is_trained_for(
-    experiment: str, service_config: str
+    experiment: str, service_config: str, served_method: str
 ) -> None:
     """Модель отказа обучают командой ``kbrag train-abstention --config configs/<service_config>``.
 
@@ -96,8 +101,8 @@ def test_classifier_experiments_match_the_config_their_model_is_trained_for(
     assert cfg.abstention.method == "classifier"
     assert cfg.abstention.model_path == service.abstention.model_path
     assert calibration_fingerprint(cfg) == calibration_fingerprint(service)
-    # Боевые конфиги пока остаются на пороге: переключение — решение по итогам эксперимента на dev.
-    assert service.abstention.method == "threshold"
+    # Метод в боевом конфиге — решение по dev, а не по умолчанию: тест ловит случайное переключение.
+    assert service.abstention.method == served_method
 
 
 @pytest.mark.parametrize("name", ["default.yaml", "offline.yaml"])
