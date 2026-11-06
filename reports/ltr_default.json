@@ -1,0 +1,543 @@
+{
+  "format_version": 1,
+  "feature_names": [
+    "rerank",
+    "rerank_rank",
+    "rerank_gap_top",
+    "rerank_z",
+    "rrf",
+    "rrf_rank",
+    "bm25",
+    "bm25_rank",
+    "bm25_rel",
+    "dense",
+    "dense_rank",
+    "dense_gap_top",
+    "doc_n_cands",
+    "rank_in_doc",
+    "doc_rank",
+    "archived",
+    "q_cov",
+    "head_cov",
+    "n_words",
+    "q_len"
+  ],
+  "params": {
+    "loss_function": "PairLogit",
+    "depth": 4
+  },
+  "catboost": {
+    "file": "ltr_default.cbm",
+    "sha256": "818f1c97e0436f21f6ed5c6911adb52648aab1d424690a9ab5ddab0be64adecb"
+  },
+  "fingerprint": "165ae5eef307",
+  "corpus_sha256": "be5fe72bcb47f3a6",
+  "train_sha256": "56e8df2f76d8f245",
+  "dev_sha256": "1527eeb22fe7cd8c",
+  "k": 5,
+  "train_report": {
+    "baseline": {
+      "recall@5": 0.8944444444444445,
+      "ndcg@5": 0.8291298351037274,
+      "mrr": 0.8273438701216479,
+      "per_type": {
+        "confusable": {
+          "n": 20,
+          "recall@5": 0.95
+        },
+        "factoid": {
+          "n": 27,
+          "recall@5": 1.0
+        },
+        "keyword": {
+          "n": 16,
+          "recall@5": 1.0
+        },
+        "multi_hop": {
+          "n": 22,
+          "recall@5": 0.9090909090909091
+        },
+        "numeric": {
+          "n": 35,
+          "recall@5": 1.0
+        },
+        "paraphrase": {
+          "n": 36,
+          "recall@5": 0.5833333333333334
+        },
+        "procedural": {
+          "n": 24,
+          "recall@5": 0.9583333333333334
+        }
+      }
+    },
+    "rules": {
+      "rule:rrf_ranks": {
+        "recall@5": 0.9,
+        "ndcg@5": 0.8259207947989468,
+        "mrr": 0.8206331168831168,
+        "per_type": {
+          "confusable": {
+            "n": 20,
+            "recall@5": 0.95
+          },
+          "factoid": {
+            "n": 27,
+            "recall@5": 1.0
+          },
+          "keyword": {
+            "n": 16,
+            "recall@5": 1.0
+          },
+          "multi_hop": {
+            "n": 22,
+            "recall@5": 0.9545454545454546
+          },
+          "numeric": {
+            "n": 35,
+            "recall@5": 1.0
+          },
+          "paraphrase": {
+            "n": 36,
+            "recall@5": 0.5833333333333334
+          },
+          "procedural": {
+            "n": 24,
+            "recall@5": 0.9583333333333334
+          }
+        }
+      },
+      "rule:doc_cap2": {
+        "recall@5": 0.8805555555555555,
+        "ndcg@5": 0.8230200338672211,
+        "mrr": 0.8254170158091726,
+        "per_type": {
+          "confusable": {
+            "n": 20,
+            "recall@5": 0.95
+          },
+          "factoid": {
+            "n": 27,
+            "recall@5": 0.9629629629629629
+          },
+          "keyword": {
+            "n": 16,
+            "recall@5": 1.0
+          },
+          "multi_hop": {
+            "n": 22,
+            "recall@5": 0.8409090909090909
+          },
+          "numeric": {
+            "n": 35,
+            "recall@5": 1.0
+          },
+          "paraphrase": {
+            "n": 36,
+            "recall@5": 0.5833333333333334
+          },
+          "procedural": {
+            "n": 24,
+            "recall@5": 0.9583333333333334
+          }
+        }
+      }
+    },
+    "cv": [
+      {
+        "name": "catboost:YetiRank-d3",
+        "params": {
+          "loss_function": "YetiRank",
+          "depth": 3
+        },
+        "recall@5": 0.8990740740740739,
+        "ndcg@5": 0.851888259343159,
+        "mrr": 0.8571628320239432,
+        "recall@5_std": 0.04434788894380758,
+        "per_type": {
+          "confusable": {
+            "n": 20,
+            "recall@5": 0.95
+          },
+          "factoid": {
+            "n": 27,
+            "recall@5": 0.9753086419753088
+          },
+          "keyword": {
+            "n": 16,
+            "recall@5": 1.0
+          },
+          "multi_hop": {
+            "n": 22,
+            "recall@5": 0.9166666666666665
+          },
+          "numeric": {
+            "n": 35,
+            "recall@5": 1.0
+          },
+          "paraphrase": {
+            "n": 36,
+            "recall@5": 0.6203703703703703
+          },
+          "procedural": {
+            "n": 24,
+            "recall@5": 0.9583333333333334
+          }
+        },
+        "n_folds": 15
+      },
+      {
+        "name": "catboost:YetiRank-d4",
+        "params": {
+          "loss_function": "YetiRank",
+          "depth": 4
+        },
+        "recall@5": 0.9027777777777778,
+        "ndcg@5": 0.8522693071235419,
+        "mrr": 0.8556718477807661,
+        "recall@5_std": 0.04333095909925033,
+        "per_type": {
+          "confusable": {
+            "n": 20,
+            "recall@5": 0.95
+          },
+          "factoid": {
+            "n": 27,
+            "recall@5": 0.9876543209876543
+          },
+          "keyword": {
+            "n": 16,
+            "recall@5": 1.0
+          },
+          "multi_hop": {
+            "n": 22,
+            "recall@5": 0.9166666666666665
+          },
+          "numeric": {
+            "n": 35,
+            "recall@5": 1.0
+          },
+          "paraphrase": {
+            "n": 36,
+            "recall@5": 0.6296296296296295
+          },
+          "procedural": {
+            "n": 24,
+            "recall@5": 0.9583333333333334
+          }
+        },
+        "n_folds": 15
+      },
+      {
+        "name": "catboost:YetiRank-d6",
+        "params": {
+          "loss_function": "YetiRank",
+          "depth": 6
+        },
+        "recall@5": 0.900925925925926,
+        "ndcg@5": 0.8472176719106755,
+        "mrr": 0.8516391967086412,
+        "recall@5_std": 0.037906462019367995,
+        "per_type": {
+          "confusable": {
+            "n": 20,
+            "recall@5": 0.95
+          },
+          "factoid": {
+            "n": 27,
+            "recall@5": 1.0
+          },
+          "keyword": {
+            "n": 16,
+            "recall@5": 1.0
+          },
+          "multi_hop": {
+            "n": 22,
+            "recall@5": 0.9015151515151515
+          },
+          "numeric": {
+            "n": 35,
+            "recall@5": 1.0
+          },
+          "paraphrase": {
+            "n": 36,
+            "recall@5": 0.6296296296296295
+          },
+          "procedural": {
+            "n": 24,
+            "recall@5": 0.9444444444444443
+          }
+        },
+        "n_folds": 15
+      },
+      {
+        "name": "catboost:PairLogit-d3",
+        "params": {
+          "loss_function": "PairLogit",
+          "depth": 3
+        },
+        "recall@5": 0.9064814814814816,
+        "ndcg@5": 0.8535302483408924,
+        "mrr": 0.8558129576185132,
+        "recall@5_std": 0.043469239238168526,
+        "per_type": {
+          "confusable": {
+            "n": 20,
+            "recall@5": 0.95
+          },
+          "factoid": {
+            "n": 27,
+            "recall@5": 1.0
+          },
+          "keyword": {
+            "n": 16,
+            "recall@5": 1.0
+          },
+          "multi_hop": {
+            "n": 22,
+            "recall@5": 0.9469696969696969
+          },
+          "numeric": {
+            "n": 35,
+            "recall@5": 1.0
+          },
+          "paraphrase": {
+            "n": 36,
+            "recall@5": 0.6203703703703703
+          },
+          "procedural": {
+            "n": 24,
+            "recall@5": 0.9583333333333334
+          }
+        },
+        "n_folds": 15
+      },
+      {
+        "name": "catboost:PairLogit-d4",
+        "params": {
+          "loss_function": "PairLogit",
+          "depth": 4
+        },
+        "recall@5": 0.9101851851851852,
+        "ndcg@5": 0.8573061831019005,
+        "mrr": 0.8588008989316178,
+        "recall@5_std": 0.03581311038113652,
+        "per_type": {
+          "confusable": {
+            "n": 20,
+            "recall@5": 0.95
+          },
+          "factoid": {
+            "n": 27,
+            "recall@5": 1.0
+          },
+          "keyword": {
+            "n": 16,
+            "recall@5": 1.0
+          },
+          "multi_hop": {
+            "n": 22,
+            "recall@5": 0.9318181818181817
+          },
+          "numeric": {
+            "n": 35,
+            "recall@5": 1.0
+          },
+          "paraphrase": {
+            "n": 36,
+            "recall@5": 0.6481481481481481
+          },
+          "procedural": {
+            "n": 24,
+            "recall@5": 0.9583333333333334
+          }
+        },
+        "n_folds": 15
+      },
+      {
+        "name": "catboost:PairLogit-d6",
+        "params": {
+          "loss_function": "PairLogit",
+          "depth": 6
+        },
+        "recall@5": 0.9083333333333333,
+        "ndcg@5": 0.8558722787052466,
+        "mrr": 0.8584156789712346,
+        "recall@5_std": 0.03888888888888889,
+        "per_type": {
+          "confusable": {
+            "n": 20,
+            "recall@5": 0.95
+          },
+          "factoid": {
+            "n": 27,
+            "recall@5": 1.0
+          },
+          "keyword": {
+            "n": 16,
+            "recall@5": 1.0
+          },
+          "multi_hop": {
+            "n": 22,
+            "recall@5": 0.9318181818181818
+          },
+          "numeric": {
+            "n": 35,
+            "recall@5": 1.0
+          },
+          "paraphrase": {
+            "n": 36,
+            "recall@5": 0.6481481481481483
+          },
+          "procedural": {
+            "n": 24,
+            "recall@5": 0.9444444444444443
+          }
+        },
+        "n_folds": 15
+      }
+    ],
+    "choice": {
+      "kind": "model",
+      "name": "catboost:PairLogit-d4",
+      "params": {
+        "loss_function": "PairLogit",
+        "depth": 4
+      },
+      "best_model": "catboost:PairLogit-d4",
+      "best_rule": "rule:rrf_ranks",
+      "margin": 0.010185185185185186
+    }
+  },
+  "dev_report": {
+    "n_questions": 56,
+    "baseline": {
+      "recall@5": 0.9196428571428571,
+      "ndcg@5": 0.8534579628397917,
+      "mrr": 0.8839923469387756,
+      "per_type": {
+        "confusable": {
+          "n": 6,
+          "recall@5": 1.0
+        },
+        "factoid": {
+          "n": 8,
+          "recall@5": 1.0
+        },
+        "keyword": {
+          "n": 5,
+          "recall@5": 1.0
+        },
+        "multi_hop": {
+          "n": 8,
+          "recall@5": 0.8125
+        },
+        "numeric": {
+          "n": 11,
+          "recall@5": 1.0
+        },
+        "paraphrase": {
+          "n": 11,
+          "recall@5": 0.7272727272727273
+        },
+        "procedural": {
+          "n": 7,
+          "recall@5": 1.0
+        }
+      }
+    },
+    "chosen": {
+      "recall@5": 0.9375,
+      "ndcg@5": 0.8766677272058977,
+      "mrr": 0.9011934824434825,
+      "per_type": {
+        "confusable": {
+          "n": 6,
+          "recall@5": 1.0
+        },
+        "factoid": {
+          "n": 8,
+          "recall@5": 1.0
+        },
+        "keyword": {
+          "n": 5,
+          "recall@5": 1.0
+        },
+        "multi_hop": {
+          "n": 8,
+          "recall@5": 0.9375
+        },
+        "numeric": {
+          "n": 11,
+          "recall@5": 1.0
+        },
+        "paraphrase": {
+          "n": 11,
+          "recall@5": 0.7272727272727273
+        },
+        "procedural": {
+          "n": 7,
+          "recall@5": 1.0
+        }
+      }
+    },
+    "diff": {
+      "recall@5": {
+        "diff": 0.017857142857142856,
+        "ci": [
+          -0.03571428571428571,
+          0.07142857142857142
+        ]
+      },
+      "ndcg@5": {
+        "diff": 0.023209764366105994,
+        "ci": [
+          -0.007951325588659639,
+          0.05605969174766207
+        ]
+      },
+      "mrr": {
+        "diff": 0.017201135504706935,
+        "ci": [
+          -0.009629269952930666,
+          0.05332013802995934
+        ]
+      }
+    },
+    "criteria": {
+      "recall_higher": true,
+      "ndcg_not_lower": true,
+      "mrr_not_lower": true
+    },
+    "switch": true
+  },
+  "importance": {
+    "rerank": 2.4963571112911085,
+    "rerank_rank": 5.641960003085968,
+    "rerank_gap_top": 10.79050392616132,
+    "rerank_z": 6.177015589817187,
+    "rrf": 4.282384207887205,
+    "rrf_rank": 9.055902011146546,
+    "bm25": 3.174163328266451,
+    "bm25_rank": 4.291122957171594,
+    "bm25_rel": 4.378450076663549,
+    "dense": 4.779260694620552,
+    "dense_rank": 4.4225797207794475,
+    "dense_gap_top": 10.39487461749981,
+    "doc_n_cands": 3.213169161554217,
+    "rank_in_doc": 4.379735713746704,
+    "doc_rank": 3.0289003630836637,
+    "archived": 2.574119842297747,
+    "q_cov": 3.1428567769785407,
+    "head_cov": 1.7826008157126874,
+    "n_words": 9.449868712864493,
+    "q_len": 2.5441743693711962
+  },
+  "created_at": "2026-11-06T14:52:55+00:00",
+  "versions": {
+    "python": "3.12.10",
+    "kbrag": "0.1.0",
+    "numpy": "2.5.4",
+    "catboost": "1.2.10"
+  }
+}
