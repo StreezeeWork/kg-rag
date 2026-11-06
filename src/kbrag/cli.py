@@ -6,6 +6,7 @@
     build-gold        собрать data/eval/gold.jsonl из частей data/eval/parts/*.jsonl
     build-train       собрать data/eval/train.jsonl (вопросы для классификатора отказа) из train_parts/
     train-abstention  обучить классификатор отказа → abstention.model_path (reports/abstention_*.json)
+    train-ranker      обучить модель ранжирования (learning-to-rank) → ltr.model_path (reports/ltr_*.json)
     ask               задать вопрос из терминала
     eval              оценить один конфиг → reports/<name>/ (+ quality gate --fail-under)
     grid              прогнать сетку экспериментов → reports/grid/
@@ -463,6 +464,86 @@ def _format_auroc_cell(entry: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# train-ranker
+# ---------------------------------------------------------------------------
+
+
+def cmd_train_ranker(args: argparse.Namespace) -> int:
+    """Обучает модель ранжирования для конфига и печатает train (CV, правила), выбор и сравнение на dev."""
+    cfg = _load_cfg(args.config, needs_index=True)
+    if not (args.out or cfg.ltr.model_path):
+        _print_error("не задан путь к модели: ltr.model_path в конфиге или --out")
+        return EXIT_ERROR
+    for path, command in ((cfg.train_path, "build-train"), (cfg.gold_path, "build-gold")):
+        if not Path(path).is_file():
+            _print_error(f"файл {path} не найден — соберите его командой `kbrag {command}`")
+            return EXIT_ERROR
+
+    from kbrag.ltr.train import train_ranker
+
+    report = train_ranker(cfg, out=args.out)
+    _print_ranker_report(report)
+    if report.model_path is not None:
+        print(f"Модель сохранена: {report.model_path}")
+    else:
+        print("Файл модели не записан: по правилу выбрано правило без обучения, модель не нужна.")
+    return EXIT_OK
+
+
+def _print_ranker_report(report: Any) -> None:
+    """Печать ``ltr.train.RankerTrainReport``: train (A, правила, CV) → выбор → dev → вердикт → признаки."""
+    k = report.k
+    recall, ndcg = f"recall@{k}", f"ndcg@{k}"
+    print(f"Вопросов с ответом: train {report.n_train}, dev {report.n_dev}; test не используется")
+    n_folds = report.cv[0]["n_folds"] if report.cv else 0
+    print(f"\nTrain: правила — на всех вопросах, модели — кросс-валидация по вопросам ({n_folds} фолдов):")
+    print(f"  {'порядок':<28}{'Recall@' + str(k):>16}{'nDCG@' + str(k):>10}{'MRR':>8}")
+
+    def row(name: str, metrics: dict, extra: str = "") -> None:
+        print(f"  {name:<28}{metrics[recall]:>16.3f}{metrics[ndcg]:>10.3f}{metrics['mrr']:>8.3f}{extra}")
+
+    row("реранкер (сейчас)", report.baseline_train)
+    for name, metrics in report.rules.items():
+        row(name, metrics)
+    for entry in report.cv:
+        std = entry.get(f"{recall}_std")
+        label = f"{entry[recall]:.3f} ± {std:.3f}" if std is not None else f"{entry[recall]:.3f}"
+        mark = "  <- выбран" if entry["name"] == report.choice["name"] else ""
+        print(f"  {entry['name']:<28}{label:>16}{entry[ndcg]:>10.3f}{entry['mrr']:>8.3f}{mark}")
+    choice = report.choice
+    print(
+        f"Лучшая модель {choice['best_model']} против лучшего правила {choice['best_rule']}: "
+        f"{choice['margin']:+.4f} Recall@{k} (модель берётся при ≥ +0.005) → выбрано: {choice['name']}"
+    )
+
+    dev = report.dev
+    print(f"\nDev ({dev['n_questions']} вопросов с ответом): выбранный порядок против реранкера")
+    print(f"  {'метрика':<12}{'выбранный':>12}{'реранкер':>12}{'разница [95% ДИ]':>28}")
+    for metric, title in ((recall, f"Recall@{k}"), (ndcg, f"nDCG@{k}"), ("mrr", "MRR")):
+        diff = dev["diff"].get(metric)
+        diff_text = (
+            "—" if diff is None else f"{diff['diff']:+.3f} [{diff['ci'][0]:+.3f}; {diff['ci'][1]:+.3f}]"
+        )
+        print(f"  {title:<12}{dev['chosen'][metric]:>12.3f}{dev['baseline'][metric]:>12.3f}{diff_text:>28}")
+    criteria = dev["criteria"]
+    marks = {True: "да", False: "нет"}
+    print(
+        f"Правило из docs/DESIGN.md: Recall@{k} выше — {marks[criteria['recall_higher']]}; "
+        f"nDCG@{k} не ниже больше чем на 0.01 — {marks[criteria['ndcg_not_lower']]}; "
+        f"MRR не ниже больше чем на 0.02 — {marks[criteria['mrr_not_lower']]}"
+    )
+    if report.switch_recommended:
+        print("Вывод: правило выполнено — боевой конфиг можно переводить на выбранный порядок.")
+    else:
+        print("Вывод: правило не выполнено — боевой конфиг остаётся на порядке реранкера.")
+
+    if report.importance:
+        print("\nТоп признаков (PredictionValuesChange: насколько признак в среднем меняет score модели):")
+        for name, value in sorted(report.importance.items(), key=lambda item: -item[1])[:8]:
+            print(f"  {name:<18}{value:>8.2f}")
+
+
+# ---------------------------------------------------------------------------
 # ask
 # ---------------------------------------------------------------------------
 
@@ -828,6 +909,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--out", default=None, help="куда сохранить модель (по умолчанию abstention.model_path)")
     p.set_defaults(handler=cmd_train_abstention)
+
+    p = commands.add_parser(
+        "train-ranker",
+        parents=[with_config],
+        help="обучить модель ранжирования (LTR): CV по вопросам на train, сравнение на dev → ltr.model_path",
+    )
+    p.add_argument("--out", default=None, help="куда сохранить модель (по умолчанию ltr.model_path)")
+    p.set_defaults(handler=cmd_train_ranker)
 
     p = commands.add_parser("ask", parents=[with_config], help="задать вопрос из терминала")
     p.add_argument("question", help="текст вопроса (в кавычках)")

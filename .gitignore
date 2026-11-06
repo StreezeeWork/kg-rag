@@ -29,6 +29,9 @@ reports/*
 # по той же причине она в git: JSON-метаданные (+ веса logreg) и деревья CatBoost (.cbm).
 !reports/abstention*.json
 !reports/abstention*.cbm
+# Модель ранжирования (ltr.enabled) — так же: её читает сервис, а шаг сетки с LTR должен воспроизводиться.
+!reports/ltr*.json
+!reports/ltr*.cbm
 
 # Секреты и локальные настройки: .env и любые варианты (.env.local, .env.prod, …).
 # Шаблон .env.example без секретов — в git.

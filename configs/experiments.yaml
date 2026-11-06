@@ -163,6 +163,30 @@ experiments:
         revision: 1427fd652930e4ba29e8149678df786c240d8825
       abstention: {method: classifier, model_path: reports/abstention_default.json}
 
+  # Learning-to-rank: те же 30 кандидатов, но финальный порядок задаёт CatBoost-ранкер по признакам
+  # BM25, dense и реранкера (`kbrag train-ranker --config configs/default.yaml`). Ревизии закреплены, как
+  # в default.yaml: модель применяется, только если отпечаток кандидатов совпадает (tests/test_configs.py).
+  # Пара для сравнения метрик поиска — hybrid_bm25_e5_rerank; правило решения — docs/DESIGN.md.
+  - name: hybrid_bm25_e5_rerank_ltr
+    description: "Гипотеза: обученный порядок (CatBoost по сигналам BM25, dense и реранкера) возвращает второй документ multi_hop-вопросов, который теряет один cross-encoder"
+    requires_neural: true
+    heavy: false
+    overrides:
+      retrieval:
+        mode: hybrid
+        top_k: 5
+        candidates_k: 30
+        dense:
+          embedder: sentence-transformers
+          model: intfloat/multilingual-e5-small
+          revision: 614241f622f53c4eeff9890bdc4f31cfecc418b3
+        hybrid: {fusion: rrf}
+      rerank:
+        enabled: true
+        model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+        revision: 1427fd652930e4ba29e8149678df786c240d8825
+      ltr: {enabled: true, model_path: reports/ltr_default.json}
+
   # --- Размер фрагмента при лучшей схеме поиска ----------------------------------
   # Самый длинный раздел корпуса — 166 слов. RecursiveChunker режет раздел, только если он
   # длиннее chunk_size, поэтому при боевом 180 (и любом значении ≥ 166) каждый раздел — ровно

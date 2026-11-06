@@ -74,6 +74,14 @@ def test_make_eval_saves_calibration() -> None:
     assert "KBRAG_ABSTENTION_METHOD=$(METHOD)" in make_recipe("eval")
 
 
+def test_ranker_model_files_are_committed() -> None:
+    # Модель ранжирования читает сервис (ltr.enabled) и шаг сетки с LTR — как модель отказа, она в git.
+    assert not git_ignores("reports/ltr_default.json")
+    assert not git_ignores("reports/ltr_default.cbm")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert "!reports/ltr*.json" in dockerignore and "!reports/ltr*.cbm" in dockerignore
+
+
 def test_calibration_is_committed_but_scratch_reports_are_not() -> None:
     assert not git_ignores(OFFLINE_CALIBRATION)
     assert not git_ignores("reports/calibration.json")  # порог для configs/default.yaml

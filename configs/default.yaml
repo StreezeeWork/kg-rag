@@ -56,6 +56,11 @@ rerank:
   max_length: 512       # длиннее обрезается: иначе модель падает или работает очень медленно
   device: auto
 
+ltr:
+  enabled: false        # learning-to-rank: финальный порядок кандидатов задаёт CatBoost-ранкер (`kbrag train-ranker
+                        # --config configs/default.yaml`). Включается только по правилу из docs/DESIGN.md (dev)
+  model_path: reports/ltr_default.json  # файл модели ранжирования (+ .cbm рядом)
+
 generation:
   backend: extractive   # по умолчанию без LLM; openai — включается переменными окружения (см. шапку файла)
   base_url: http://localhost:8000/v1   # OpenAI-совместимый API (vLLM из docker compose слушает порт 8000)

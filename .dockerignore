@@ -24,12 +24,14 @@ venv
 # Эталонный набор нужен только для оценки (`kbrag eval`), сервис читает лишь корпус data/corpus
 data/eval
 
-# Отчёты оценки не нужны сервису — кроме файлов калибровки порога отказа и модели отказа
+# Отчёты оценки не нужны сервису — кроме файлов калибровки порога отказа, модели отказа и модели ранжирования
 reports/*
 !reports/.gitkeep
 !reports/calibration*.json
 !reports/abstention*.json
 !reports/abstention*.cbm
+!reports/ltr*.json
+!reports/ltr*.cbm
 
 # Не нужно во время работы сервиса
 tests

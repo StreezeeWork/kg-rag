@@ -17,6 +17,7 @@ from kbrag.config import AppConfig, load_config
 from kbrag.eval.runner import load_experiments
 from kbrag.ingest import load_corpus
 from kbrag.ingest.chunking import chunk_corpus, make_chunker
+from kbrag.ltr import candidates_fingerprint
 from kbrag.pipeline import calibration_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,6 +104,18 @@ def test_classifier_experiments_match_the_config_their_model_is_trained_for(
     assert calibration_fingerprint(cfg) == calibration_fingerprint(service)
     # Метод в боевом конфиге — решение по dev, а не по умолчанию: тест ловит случайное переключение.
     assert service.abstention.method == served_method
+
+
+def test_ltr_experiment_matches_the_config_its_ranker_is_trained_for() -> None:
+    """Модель ранжирования обучают командой ``kbrag train-ranker --config configs/default.yaml``.
+
+    Сервис и оценка применяют её, только если совпадает отпечаток кандидатов (нарезка, поиск, реранкер);
+    иначе шаг сетки ``hybrid_bm25_e5_rerank_ltr`` упал бы при старте пайплайна.
+    """
+    cfg = experiment_configs()["hybrid_bm25_e5_rerank_ltr"]
+    service = load_config(CONFIGS / "default.yaml")
+    assert cfg.ltr.enabled and cfg.ltr.model_path == service.ltr.model_path
+    assert candidates_fingerprint(cfg) == candidates_fingerprint(service)
 
 
 @pytest.mark.parametrize("name", ["default.yaml", "offline.yaml"])

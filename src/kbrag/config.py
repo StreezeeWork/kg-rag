@@ -120,6 +120,15 @@ class AbstentionConfig(_Strict):
     model_path: str | None = None
 
 
+class LTRConfig(_Strict):
+    # Learning-to-rank: обученная модель (kbrag.ltr, `kbrag train-ranker`) задаёт финальный порядок
+    # кандидатов по признакам BM25, dense и реранкера вместо одного score реранкера.
+    # Включённый, но неподходящий файл модели — ошибка при старте, а не тихий откат: от порядка
+    # выдачи зависят модель отказа и порог, и их пришлось бы молча применять к другой выдаче.
+    enabled: bool = False
+    model_path: str | None = None
+
+
 class GuardrailsConfig(_Strict):
     enabled: bool = True
     action: Literal["drop_line", "drop_chunk", "flag_only"] = "drop_line"
@@ -155,6 +164,7 @@ class AppConfig(_Strict):
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     rerank: RerankConfig = Field(default_factory=RerankConfig)
+    ltr: LTRConfig = Field(default_factory=LTRConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     abstention: AbstentionConfig = Field(default_factory=AbstentionConfig)
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)

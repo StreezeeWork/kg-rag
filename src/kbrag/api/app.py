@@ -239,7 +239,7 @@ class AskResponse(BaseModel):
     citations: list[CitationOut]
     contexts: list[ContextOut]
     timings_ms: dict[str, float] = Field(
-        description="Время этапов: retrieve_ms, rerank_ms, generate_ms, total_ms"
+        description="Время этапов: retrieve_ms, rerank_ms, rank_ms (только с LTR), generate_ms, total_ms"
     )
     flags: list[str] = Field(
         description="Служебные пометки: low_confidence, abstain_classifier, prompt_injection:<chunk_id>, …"
@@ -719,6 +719,8 @@ def _add_routes(app: FastAPI, state: ServiceState) -> None:
             # откалиброван именно для него (уверенность всегда считается по первым top_k фрагментам).
             "top_k": state.cfg.retrieval.top_k if state.cfg is not None else None,
             "reranker": _component_name(pipeline, "reranker"),
+            # Что задаёт финальный порядок выдачи: "ltr:<модель>", "rerank" или имя поисковика.
+            "ranking": getattr(pipeline, "ranking_method", None),
             "generator": _component_name(pipeline, "generator"),
             # Из какого score поиска берётся «уверенность» (rerank / dense / bm25).
             "score_source": getattr(pipeline, "score_source", None),

@@ -7,7 +7,7 @@
 
 Схема одного ответа (``RAGPipeline.answer``)::
 
-    вопрос ──► retrieve(): поиск candidates_k/top_k ──► [реранкер] ──► top_k фрагментов
+    вопрос ──► retrieve(): поиск candidates_k/top_k ──► [реранкер] ──► [модель ранжирования, ltr] ──► top_k фрагментов
            ──► confidence(): насколько поиск «уверен», что нашёл ответ
                [abstain_score(): P(нет ответа) по классификатору — если abstention.method: classifier]
            ──► guardrails: пометить и вычистить инъекции во фрагментах
@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -34,7 +35,7 @@ from pathlib import Path
 
 from kbrag.abstention.features import extract_features
 from kbrag.abstention.models import AbstentionModel, load_abstention_model
-from kbrag.config import AppConfig, config_fingerprint
+from kbrag.config import AppConfig
 from kbrag.generation import (
     ABSTAIN_TEXT,
     Generator,
@@ -45,6 +46,7 @@ from kbrag.generation import (
     select_within_budget,
 )
 from kbrag.ingest import chunk_corpus, corpus_fingerprint, load_corpus, make_chunker
+from kbrag.ltr.models import RankerModel, candidates_fingerprint, load_ranker, ranker_identity
 from kbrag.retrieval import Reranker, Retriever, build_retriever, make_reranker
 from kbrag.types import Answer, Chunk, Document, ScoredChunk
 
@@ -65,13 +67,22 @@ CONTEXT_TRUNCATED_FLAG = "context_truncated"
 
 
 def calibration_fingerprint(cfg: AppConfig) -> str:
-    """Отпечаток настроек, от которых зависит шкала «уверенности» поиска.
+    """Отпечаток настроек, от которых зависит выдача поиска — а с ней шкала «уверенности».
 
     Порог имеет смысл только для того поиска, на котором его подобрали: смена нарезки,
     режима поиска или реранкера меняет и распределение score. Настройки генерации
     сюда не входят — от них уверенность поиска не зависит.
+
+    При ``ltr.enabled`` порядок выдачи задаёт ещё и модель ранжирования, поэтому в отпечаток
+    входит хэш её файла (``ltr.models.ranker_identity``): порог и модель отказа, подобранные на выдаче
+    одной модели, не применятся к выдаче переобученной. Без LTR отпечаток прежний — уже сохранённые
+    файлы калибровки и модели отказа остаются в силе.
     """
-    return config_fingerprint(cfg, "chunking", "retrieval", "rerank")
+    candidates = candidates_fingerprint(cfg)
+    if not cfg.ltr.enabled:
+        return candidates
+    raw = f"{candidates}:ltr:{ranker_identity(cfg)}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
 def resolve_score_source(cfg: AppConfig, has_reranker: bool) -> str:
@@ -233,6 +244,9 @@ class RAGPipeline:
 
     ``abstention_model`` — классификатор отказа. Если он передан, решение об отказе принимает
     он (``threshold`` тогда не используется); None — работает пороговый метод.
+
+    ``ranker`` — модель ранжирования (learning-to-rank). Если она передана, финальный порядок
+    кандидатов задаёт она, а не score реранкера; None — порядок реранкера (или поиска без него).
     """
 
     def __init__(
@@ -245,6 +259,7 @@ class RAGPipeline:
         docs: list[Document] | None = None,
         chunks: list[Chunk] | None = None,
         abstention_model: AbstentionModel | None = None,
+        ranker: RankerModel | None = None,
     ) -> None:
         self.cfg = cfg
         self.retriever = retriever
@@ -252,6 +267,7 @@ class RAGPipeline:
         self.reranker = reranker
         self.threshold = threshold
         self.abstention_model = abstention_model
+        self.ranker = ranker
         # Фрагменты берём у ретривера, если их не передали явно: они нужны для статистики
         # и для метрик (по chunk_id из ссылки находим исходный фрагмент).
         self.chunks: list[Chunk] = (
@@ -280,6 +296,9 @@ class RAGPipeline:
         index_time_ms = _elapsed_ms(started)
 
         corpus_sha256 = corpus_fingerprint(list(docs))
+        # Модель ранжирования — до модели отказа: та обучена на выдаче, которую задаёт ранкер.
+        # Неподходящий файл — ValueError здесь, при старте (почему не откат — ltr.models).
+        ranker = load_ranker(cfg, corpus_sha256=corpus_sha256) if cfg.ltr.enabled else None
         abstention_model = None
         if cfg.abstention.enabled and cfg.abstention.method == "classifier":
             abstention_model = load_abstention_model(cfg, corpus_sha256=corpus_sha256)
@@ -302,18 +321,30 @@ class RAGPipeline:
             docs=list(docs),
             chunks=chunks,
             abstention_model=abstention_model,
+            ranker=ranker,
         )
         pipeline.index_stats = pipeline._compute_index_stats(index_time_ms=index_time_ms)
         logger.info(
-            "Пайплайн готов: %d документов, %d фрагментов, индекс за %.0f мс, отказ: %s, порог %s, уверенность по %s",
+            "Пайплайн готов: %d документов, %d фрагментов, индекс за %.0f мс, порядок: %s, отказ: %s, "
+            "порог %s, уверенность по %s",
             pipeline.index_stats["n_docs"],
             pipeline.index_stats["n_chunks"],
             index_time_ms,
+            pipeline.ranking_method,
             pipeline.abstention_method,
             pipeline.threshold,
             pipeline.score_source,
         )
         return pipeline
+
+    @property
+    def ranking_method(self) -> str:
+        """Что задаёт финальный порядок: ``ltr:<модель>``, ``rerank`` или имя поисковика (``hybrid``, ``bm25``…)."""
+        if self.ranker is not None:
+            return f"ltr:{self.ranker.name}"
+        if self.reranker is not None:
+            return "rerank"
+        return getattr(self.retriever, "name", "retriever")
 
     @property
     def abstention_method(self) -> str:
@@ -334,22 +365,42 @@ class RAGPipeline:
     def retrieve(self, question: str, top_k: int | None = None) -> tuple[list[ScoredChunk], dict[str, float]]:
         """Находит ``top_k`` фрагментов и возвращает их вместе с таймингами этапов.
 
-        С реранкером поиск достаёт больше кандидатов (``candidates_k``): реранкер может
-        поднять наверх фрагмент с 20-го места, но только если этот фрагмент ему показали.
+        С реранкером или моделью ранжирования поиск достаёт больше кандидатов (``candidates_k``):
+        они могут поднять наверх фрагмент с 20-го места, но только если этот фрагмент им показали.
         """
         top_k = self._resolve_top_k(top_k)
-        n_candidates = max(self.cfg.retrieval.candidates_k, top_k) if self.reranker is not None else top_k
+        candidates, timings = self.candidates(question, top_k)
+        if self.ranker is None:
+            return candidates[:top_k], timings
+        started = time.perf_counter()
+        ranked = self.ranker.rank(question, candidates, with_header=self.cfg.chunking.with_header)
+        timings["rank_ms"] = _elapsed_ms(started)
+        return ranked[:top_k], timings
+
+    def candidates(
+        self, question: str, top_k: int | None = None
+    ) -> tuple[list[ScoredChunk], dict[str, float]]:
+        """Все кандидаты до модели ранжирования: поиск и, если он включён, реранкер по всем кандидатам.
+
+        Это вход модели ранжирования — и в сервисе (``retrieve``), и при её обучении
+        (``ltr.train.candidate_table``): один код, поэтому признаки при обучении и в проде совпадают.
+        Без реранкера и ранкера кандидатов столько, сколько просили (``top_k``): пересортировывать некому.
+        """
+        top_k = self._resolve_top_k(top_k)
+        reorders = self.reranker is not None or self.ranker is not None
+        n_candidates = max(self.cfg.retrieval.candidates_k, top_k) if reorders else top_k
 
         started = time.perf_counter()
         candidates = self.retriever.search(question, n_candidates)
         timings = {"retrieve_ms": _elapsed_ms(started), "rerank_ms": 0.0}
-
         if self.reranker is None:
-            return candidates[:top_k], timings
+            return candidates, timings
         started = time.perf_counter()
-        reranked = self.reranker.rerank(question, candidates, top_k)
+        # Реранкер оценивает всех кандидатов в любом случае; обрезаем выдачу до top_k только без ранкера.
+        keep = len(candidates) if self.ranker is not None else top_k
+        reranked = self.reranker.rerank(question, candidates, keep)
         timings["rerank_ms"] = _elapsed_ms(started)
-        return reranked[:top_k], timings
+        return reranked, timings
 
     def confidence(self, contexts: list[ScoredChunk]) -> float | None:
         """Уверенность поиска: максимум ``details[source]`` по найденным фрагментам.
@@ -424,7 +475,7 @@ class RAGPipeline:
         """
         started = time.perf_counter()
         timings = {"retrieve_ms": 0.0, "rerank_ms": 0.0, **(timings or {})}
-        search_ms = timings["retrieve_ms"] + timings["rerank_ms"]
+        search_ms = search_time_ms(timings)
         guardrails = self.cfg.guardrails
         flags = check_question(question) if guardrails.enabled else []
         decision_contexts = contexts if confidence_contexts is None else confidence_contexts
@@ -554,6 +605,11 @@ class RAGPipeline:
                 mode,
                 "есть" if self.reranker is not None else "нет",
             )
+
+
+def search_time_ms(timings: dict[str, float]) -> float:
+    """Время поиска целиком: сам поиск, реранкер и модель ранжирования (``rank_ms`` есть только с LTR)."""
+    return timings.get("retrieve_ms", 0.0) + timings.get("rerank_ms", 0.0) + timings.get("rank_ms", 0.0)
 
 
 def _elapsed_ms(started: float) -> float:

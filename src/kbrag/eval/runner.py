@@ -74,7 +74,7 @@ from kbrag.eval.results import (
 )
 from kbrag.generation import ABSTAIN_TEXT, LLMError
 from kbrag.ingest import corpus_fingerprint, load_corpus
-from kbrag.pipeline import ABSTAIN_CLASSIFIER_FLAG, LOW_CONFIDENCE_FLAG, RAGPipeline
+from kbrag.pipeline import ABSTAIN_CLASSIFIER_FLAG, LOW_CONFIDENCE_FLAG, RAGPipeline, search_time_ms
 from kbrag.retrieval import neural_available
 from kbrag.types import Answer, Citation, Document, ScoredChunk
 
@@ -243,7 +243,7 @@ def _llm_error_answer(
     Уверенность считаем как обычно — по ней на dev подбирается порог, и выбрасывать вопрос
     из калибровки из-за сбоя генерации нельзя.
     """
-    search_ms = timings.get("retrieve_ms", 0.0) + timings.get("rerank_ms", 0.0)
+    search_ms = search_time_ms(timings)
     return Answer(
         question=question,
         text="",
@@ -629,6 +629,12 @@ def _skip_reason(spec: ExperimentSpec, cfg: AppConfig, include_heavy: bool) -> s
     if _uses_classifier(cfg) and not (model_path and Path(model_path).is_file()):
         return (
             f"нет файла модели отказа {model_path}: сначала kbrag train-abstention "
+            "--config <конфиг с теми же настройками поиска>"
+        )
+    ranker_path = cfg.ltr.model_path
+    if cfg.ltr.enabled and not (ranker_path and Path(ranker_path).is_file()):
+        return (
+            f"нет файла модели ранжирования {ranker_path}: сначала kbrag train-ranker "
             "--config <конфиг с теми же настройками поиска>"
         )
     return None
