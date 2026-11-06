@@ -9,15 +9,17 @@ chunk_size больше самого длинного раздела), в leader
 from __future__ import annotations
 
 import itertools
+import json
 from pathlib import Path
 
 import pytest
 
 from kbrag.config import AppConfig, load_config
+from kbrag.eval.dataset import items_fingerprint, load_gold
 from kbrag.eval.runner import load_experiments
-from kbrag.ingest import load_corpus
+from kbrag.ingest import corpus_fingerprint, load_corpus
 from kbrag.ingest.chunking import chunk_corpus, make_chunker
-from kbrag.ltr import candidates_fingerprint
+from kbrag.ltr import candidates_fingerprint, load_ranker
 from kbrag.pipeline import calibration_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,6 +118,29 @@ def test_ltr_experiment_matches_the_config_its_ranker_is_trained_for() -> None:
     service = load_config(CONFIGS / "default.yaml")
     assert cfg.ltr.enabled and cfg.ltr.model_path == service.ltr.model_path
     assert candidates_fingerprint(cfg) == candidates_fingerprint(service)
+
+
+def test_committed_models_match_the_default_config() -> None:
+    """Ранкер, модель отказа и запасной порог в git посчитаны для нынешнего configs/default.yaml.
+
+    Без нейросетей: сверяются только паспорта. Иначе после правки поиска или переобучения ранкера
+    сервис молча остался бы без отказов (модель и порог не пройдут проверку отпечатка), а CI этого не заметил бы.
+    """
+    pytest.importorskip("catboost")
+    cfg = load_config(CONFIGS / "default.yaml")
+    corpus = corpus_fingerprint(load_corpus(cfg.corpus_dir))
+    if cfg.ltr.enabled:
+        load_ranker(cfg, corpus_sha256=corpus)  # любое несоответствие — ValueError
+    expected = calibration_fingerprint(cfg)
+    if cfg.abstention.method == "classifier":
+        model = json.loads(Path(cfg.abstention.model_path).read_text(encoding="utf-8"))
+        assert model["fingerprint"] == expected and model["corpus_sha256"] == corpus
+        gold = load_gold(cfg.gold_path)
+        assert model["dev_sha256"] == items_fingerprint([item for item in gold if item.split == "dev"])
+        assert model["train_sha256"] == items_fingerprint(load_gold(cfg.train_path))
+    calibration = json.loads(Path(cfg.abstention.calibration_path).read_text(encoding="utf-8"))
+    assert calibration["fingerprint"] == expected and calibration["corpus_sha256"] == corpus
+    assert calibration["score_source"] == cfg.abstention.score_source
 
 
 @pytest.mark.parametrize("name", ["default.yaml", "offline.yaml"])

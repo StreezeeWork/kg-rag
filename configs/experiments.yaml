@@ -161,6 +161,8 @@ experiments:
         enabled: true
         model: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
         revision: 1427fd652930e4ba29e8149678df786c240d8825
+      # Модель отказа обучена на выдаче с LTR (как в default.yaml): без ранкера отпечаток выдачи другой.
+      ltr: {enabled: true, model_path: reports/ltr_default.json}
       abstention: {method: classifier, model_path: reports/abstention_default.json}
 
   # Learning-to-rank: те же 30 кандидатов, но финальный порядок задаёт CatBoost-ранкер по признакам

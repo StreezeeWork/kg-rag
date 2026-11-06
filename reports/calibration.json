@@ -1,8 +1,8 @@
 {
-  "fingerprint": "165ae5eef307",
+  "fingerprint": "98eea1f3f322",
   "score_source": "dense",
-  "threshold": 0.8712671101093292,
+  "threshold": 0.8615069389343262,
   "corpus_sha256": "be5fe72bcb47f3a6",
-  "experiment": "neural",
-  "created_at": "2026-10-26T17:36:07+00:00"
+  "experiment": "default_threshold",
+  "created_at": "2026-11-06T23:19:11+00:00"
 }

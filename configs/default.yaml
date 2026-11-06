@@ -57,9 +57,11 @@ rerank:
   device: auto
 
 ltr:
-  enabled: false        # learning-to-rank: финальный порядок кандидатов задаёт CatBoost-ранкер (`kbrag train-ranker
-                        # --config configs/default.yaml`). Включается только по правилу из docs/DESIGN.md (dev)
-  model_path: reports/ltr_default.json  # файл модели ранжирования (+ .cbm рядом)
+  enabled: true         # learning-to-rank: финальный порядок кандидатов задаёт CatBoost-ранкер (`kbrag train-ranker
+                        # --config configs/default.yaml`). Включён по правилу из docs/DESIGN.md, записанному до обучения:
+                        # на dev Recall@5 0.938 против 0.920 у порядка реранкера, nDCG@5 0.877 против 0.853, MRR 0.901
+                        # против 0.884 (ДИ разниц на 56 вопросах включают 0). Test — только отчёт: docs/results/ltr.md
+  model_path: reports/ltr_default.json  # файл модели ранжирования (+ .cbm рядом); нет файла — ошибка при старте
 
 generation:
   backend: extractive   # по умолчанию без LLM; openai — включается переменными окружения (см. шапку файла)
@@ -76,9 +78,10 @@ generation:
 abstention:
   enabled: true         # отказываемся отвечать, если поиск не уверен: выдумка хуже честного «не знаю»
   method: classifier    # модель отказа (CatBoost на 20 признаках выдачи; `kbrag train-abstention --config
-                        # configs/default.yaml`). Решение по правилу из docs/DESIGN.md, записанному ДО обучения: на dev
-                        # balanced accuracy 0.889 против 0.768 у порога, AUROC 0.921 против 0.793, при равном числе
-                        # отказов ловит не меньше. Test — только отчёт: docs/results/abstention.md, раздел 9.
+                        # configs/default.yaml`). Решение по правилу из docs/DESIGN.md, записанному ДО обучения;
+                        # после перехода на LTR модель переобучена (выдача train — out-of-fold-ранкерами) и правило
+                        # проверено заново: на dev balanced accuracy 0.862 против 0.766 у порога, AUROC 0.904 против
+                        # 0.793, при 27 отказах ловит 13/15 против 12/15. Test — только отчёт: docs/results/ltr.md.
                         # Нужен catboost (`pip install -e .[classic]`); нет файла модели — откат на порог ниже.
   threshold: auto       # запасной порог по уверенности: подбирается на dev, сервис берёт его, только если модели
                         # отказа нет. Сохраняет `make eval CONFIG=configs/default.yaml NAME=neural_threshold METHOD=threshold`
