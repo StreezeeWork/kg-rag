@@ -481,17 +481,34 @@ def cmd_train_ranker(args: argparse.Namespace) -> int:
 
     from kbrag.ltr.train import train_ranker
 
-    report = train_ranker(cfg, out=args.out)
-    _print_ranker_report(report)
-    if report.model_path is not None:
+    try:
+        report = train_ranker(cfg, out=args.out)
+    except (ImportError, ValueError) as exc:
+        _print_error(str(exc))
+        return EXIT_ERROR
+    _print_ranker_report(report, ltr_enabled=cfg.ltr.enabled)
+    if report.saved_as_candidate:
+        print(
+            f"Модель НЕ прошла правило на dev, а боевой конфиг уже на LTR: она сохранена рядом, "
+            f"не поверх боевой — {report.model_path}. Боевой файл {cfg.ltr.model_path} не тронут."
+        )
+    elif report.model_path is not None:
         print(f"Модель сохранена: {report.model_path}")
     else:
-        print("Файл модели не записан: по правилу выбрано правило без обучения, модель не нужна.")
+        print("Файл модели не записан: по правилу выбрано правило без обучения.")
+        target = Path(args.out or cfg.ltr.model_path)
+        if target.is_file():
+            print(
+                f"  Внимание: прежняя модель {target} осталась на месте и применяется при ltr.enabled: true."
+            )
     return EXIT_OK
 
 
-def _print_ranker_report(report: Any) -> None:
-    """Печать ``ltr.train.RankerTrainReport``: train (A, правила, CV) → выбор → dev → вердикт → признаки."""
+def _print_ranker_report(report: Any, ltr_enabled: bool = False) -> None:
+    """Печать ``ltr.train.RankerTrainReport``: train (A, правила, CV) → выбор → dev → вердикт → признаки.
+
+    ``ltr_enabled`` — включён ли LTR в конфиге уже сейчас: от этого зависит, что значит вердикт для сервиса.
+    """
     k = report.k
     recall, ndcg = f"recall@{k}", f"ndcg@{k}"
     print(f"Вопросов с ответом: train {report.n_train}, dev {report.n_dev}; test не используется")
@@ -519,7 +536,8 @@ def _print_ranker_report(report: Any) -> None:
     dev = report.dev
     print(f"\nDev ({dev['n_questions']} вопросов с ответом): выбранный порядок против реранкера")
     print(f"  {'метрика':<12}{'выбранный':>12}{'реранкер':>12}{'разница [95% ДИ]':>28}")
-    for metric, title in ((recall, f"Recall@{k}"), (ndcg, f"nDCG@{k}"), ("mrr", "MRR")):
+    mrr_title = f"MRR@{report.mrr_at}" if report.mrr_at else "MRR"
+    for metric, title in ((recall, f"Recall@{k}"), (ndcg, f"nDCG@{k}"), ("mrr", mrr_title)):
         diff = dev["diff"].get(metric)
         diff_text = (
             "—" if diff is None else f"{diff['diff']:+.3f} [{diff['ci'][0]:+.3f}; {diff['ci'][1]:+.3f}]"
@@ -532,15 +550,30 @@ def _print_ranker_report(report: Any) -> None:
         f"nDCG@{k} не ниже больше чем на 0.01 — {marks[criteria['ndcg_not_lower']]}; "
         f"MRR не ниже больше чем на 0.02 — {marks[criteria['mrr_not_lower']]}"
     )
-    if report.switch_recommended:
-        print("Вывод: правило выполнено — боевой конфиг можно переводить на выбранный порядок.")
+    if report.switch_recommended and report.choice["kind"] == "rule":
+        print(
+            "Вывод: правило выполнено, но выиграло правило без обучения, а сервис пока применяет только "
+            "модель (ltr.enabled + файл). Чтобы переключиться, правило сначала нужно встроить в пайплайн."
+        )
+    elif report.switch_recommended:
+        print(
+            "Вывод: правило выполнено — боевой конфиг можно переводить на выбранный порядок (ltr.enabled: true)."
+        )
+    elif ltr_enabled:
+        print(
+            "Вывод: правило НЕ выполнено, а боевой конфиг уже на LTR — разумно выключить ltr.enabled "
+            "или оставить прежнюю модель."
+        )
     else:
         print("Вывод: правило не выполнено — боевой конфиг остаётся на порядке реранкера.")
 
     if report.importance:
-        print("\nТоп признаков (PredictionValuesChange: насколько признак в среднем меняет score модели):")
+        print(
+            f"\nТоп признаков ({report.importance_kind}: насколько ухудшается функция потерь ранжирования "
+            "без признака):"
+        )
         for name, value in sorted(report.importance.items(), key=lambda item: -item[1])[:8]:
-            print(f"  {name:<18}{value:>8.2f}")
+            print(f"  {name:<18}{value:>10.4f}")
 
 
 # ---------------------------------------------------------------------------

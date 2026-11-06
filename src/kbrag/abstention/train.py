@@ -77,18 +77,28 @@ TIE_TOLERANCE = 1e-9
 
 
 def feature_table(
-    pipeline: RAGPipeline, items: Sequence[GoldItem]
+    pipeline: RAGPipeline, items: Sequence[GoldItem], rankers: Mapping[str, Any] | None = None
 ) -> tuple[list[dict[str, float]], np.ndarray, list[str]]:
     """Признаки, метки и id вопросов: ``(rows, y, qids)``, ``y = 1`` — в базе нет ответа.
 
     Почему класс 1 — «нет ответа»: модель предсказывает вероятность события, ради которого
     существует (отказаться), а PR-AUC считается по редкому, интересному классу.
     Фрагменты — ``pipeline.retrieve(вопрос, top_k)``: ровно те, что сервис отдаёт генератору.
+
+    ``rankers`` — модель ранжирования для отдельных вопросов вместо боевой (``qid → RankerModel``).
+    Так train-признаки строятся out-of-fold-ранкерами (``ltr.train.out_of_fold_rankers``): боевой ранкер
+    обучен на тех же train-вопросах, и его выдача на них оптимистичнее, чем на новых.
     """
     top_k = pipeline.cfg.retrieval.top_k
+    with_header = pipeline.cfg.chunking.with_header
     rows: list[dict[str, float]] = []
     for item in items:
-        contexts, _ = pipeline.retrieve(item.question, top_k=top_k)
+        ranker = (rankers or {}).get(item.qid)
+        if ranker is None:
+            contexts, _ = pipeline.retrieve(item.question, top_k=top_k)
+        else:
+            candidates, _ = pipeline.candidates(item.question, top_k=top_k)
+            contexts = ranker.rank(item.question, candidates, with_header=with_header)[:top_k]
         rows.append(extract_features(item.question, contexts))
     y = np.asarray([0 if item.answerable else 1 for item in items], dtype=int)
     return rows, y, [item.qid for item in items]
@@ -433,17 +443,19 @@ def fit_abstention(
     dev: Sequence[GoldItem],
     model: str = "auto",
     seed: int = 0,
+    train_rankers: Mapping[str, Any] | None = None,
 ) -> tuple[AbstentionModel | None, TrainReport]:
     """Ядро обучения на готовом пайплайне: CV на train, финальная модель на всём train, порог на dev.
 
     train и dev передаются явно и проверяются по ``split``: test сюда попасть не может.
     Модель — None, если на dev не нашлось порога лучше «никогда не отказываться»: такую модель
     сервису отдавать незачем (отчёт при этом всё равно возвращается — его стоит прочитать).
+    ``train_rankers`` — out-of-fold-ранкеры для train-вопросов (см. ``feature_table``); dev ранжирует боевой.
     """
     _require_split(train, TRAIN_SPLIT, "обучающий набор")
     _require_split(dev, "dev", "набор для порога")
 
-    rows_train, y_train, _ = feature_table(pipeline, train)
+    rows_train, y_train, _ = feature_table(pipeline, train, train_rankers)
     rows_dev, y_dev, _ = feature_table(pipeline, dev)
     baseline_feature = f"{pipeline.score_source}_top1"
 
@@ -523,7 +535,16 @@ def train_abstention(
         update={"abstention": cfg.abstention.model_copy(update={"method": "threshold", "threshold": None})}
     )
     pipeline = RAGPipeline.from_config(feature_cfg, docs=docs)
-    model_obj, report = fit_abstention(pipeline, train, dev, model=model, seed=seed)
+    # С LTR выдачу train-вопросов строят ранкеры, которые этих вопросов не видели (стекинг без утечки);
+    # боевой ранкер обучен на всём train и ранжирует только dev — как в сервисе новые вопросы.
+    train_rankers = None
+    if pipeline.ranker is not None:
+        from kbrag.ltr.train import out_of_fold_rankers
+
+        train_rankers = out_of_fold_rankers(pipeline, train, docs, pipeline.ranker.params, seed=seed)
+    model_obj, report = fit_abstention(
+        pipeline, train, dev, model=model, seed=seed, train_rankers=train_rankers
+    )
     if model_obj is None:
         return report
 

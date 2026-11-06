@@ -40,6 +40,7 @@ from typing import Any
 
 import numpy as np
 
+from kbrag.abstention.models import CATBOOST_INSTALL_HINT, catboost_available, import_catboost
 from kbrag.config import AppConfig
 from kbrag.eval.dataset import (
     TRAIN_SPLIT,
@@ -71,6 +72,7 @@ MRR_TOLERANCE = 0.02
 TIE_TOLERANCE = 1e-9
 RRF_K = 60  # как у гибрида по умолчанию (retrieval.hybrid.rrf_k)
 DOC_CAP = 2
+IMPORTANCE_KIND = "LossFunctionChange"
 
 BASELINE = "rerank"  # порядок A: как кандидаты пришли от реранкера (без него — от поиска)
 RULE_RRF = "rule:rrf_ranks"
@@ -96,13 +98,9 @@ def candidate_table(
 ) -> list[QueryTable]:
     """Кандидаты, признаки и разметка для вопросов с ответом — тем же кодом, что в сервисе.
 
-    Кандидаты берутся из ``RAGPipeline.candidates``: поиск + реранкер по всем ``candidates_k``.
-    У пайплайна не должно быть ранкера: модель учится переставлять ровно то, что приходит к ней в сервисе.
+    Кандидаты берутся из ``RAGPipeline.candidates``: поиск + реранкер по всем ``candidates_k``, ещё до модели
+    ранжирования (её ``candidates`` не применяет). Модель учится переставлять ровно то, что приходит к ней в сервисе.
     """
-    if pipeline.ranker is not None:
-        raise ValueError(
-            "кандидатов для обучения собирают пайплайном без модели ранжирования (ltr.enabled: false)"
-        )
     docs_by_id = {doc.doc_id: doc for doc in docs}
     cfg = pipeline.cfg
     n_candidates = max(cfg.retrieval.candidates_k, cfg.retrieval.top_k)
@@ -131,20 +129,30 @@ def candidate_table(
 # ---------------------------------------------------------------------------
 
 
-def order_metrics(table: QueryTable, order: Sequence[int], k: int) -> dict[str, float]:
-    """Recall@k, nDCG@k и MRR вопроса при порядке кандидатов ``order`` (индексы строк таблицы)."""
+def order_metrics(
+    table: QueryTable, order: Sequence[int], k: int, mrr_at: int | None = None
+) -> dict[str, float]:
+    """Recall@k, nDCG@k и MRR вопроса при порядке кандидатов ``order`` (индексы строк таблицы).
+
+    ``mrr_at`` — сколько первых мест смотрит MRR. ``kbrag eval`` хранит выдачу длины ``max(eval.k_values)``
+    (10) и MRR считает по ней; чтобы вердикт на dev предсказывал отчёт оценки, здесь та же отсечка.
+    """
     coverage = [table.coverage[i] for i in order]
     if not coverage:
         return {f"recall@{k}": 0.0, f"ndcg@{k}": 0.0, "mrr": 0.0}
     return {
         f"recall@{k}": recall_at_k(coverage, k),
         f"ndcg@{k}": ndcg_at_k(coverage, k),
-        "mrr": mrr(coverage),
+        "mrr": mrr(coverage[:mrr_at] if mrr_at else coverage),
     }
 
 
 def order_by_scores(scores: np.ndarray) -> list[int]:
-    """Индексы по убыванию score; при равенстве — исходный порядок (то есть порядок реранкера)."""
+    """Индексы по убыванию score; при равенстве — исходный порядок (то есть порядок реранкера).
+
+    Тот же tie-break, что у ``RankerModel.rank`` в сервисе (стабильная сортировка по score), — иначе
+    равные score переставлялись бы при обучении и в проде по-разному.
+    """
     values = np.nan_to_num(np.asarray(scores, dtype=np.float64), nan=-np.inf)
     return [int(i) for i in np.lexsort((np.arange(len(values)), -values))]
 
@@ -175,10 +183,13 @@ def rule_order(name: str, table: QueryTable) -> list[int]:
 
 
 def evaluate_orders(
-    tables: Sequence[QueryTable], order_fn: Callable[[QueryTable], Sequence[int]], k: int
+    tables: Sequence[QueryTable],
+    order_fn: Callable[[QueryTable], Sequence[int]],
+    k: int,
+    mrr_at: int | None = None,
 ) -> dict[str, Any]:
     """Средние метрики порядка по вопросам и Recall@k по типам вопросов."""
-    rows = [order_metrics(table, order_fn(table), k) for table in tables]
+    rows = [order_metrics(table, order_fn(table), k, mrr_at) for table in tables]
     return {**_mean_metrics(rows, k), "per_type": _per_type(tables, rows, k), "per_question": rows}
 
 
@@ -197,6 +208,7 @@ def cross_validate(
     k: int,
     grid: Sequence[Mapping[str, Any]] | None = None,
     seed: int = 0,
+    mrr_at: int | None = None,
 ) -> list[dict[str, Any]]:
     """CV_REPEATS × CV_SPLITS фолдов по вопросам; у всех кандидатов одни и те же фолды (сравнение парное).
 
@@ -218,7 +230,8 @@ def cross_validate(
                     continue
                 model = _fit([tables[i] for i in train_idx], {**params, "random_seed": seed + repeat})
                 for i in test_idx:
-                    metrics = order_metrics(tables[i], order_by_scores(model.predict(tables[i].features)), k)
+                    order = order_by_scores(model.predict(tables[i].features))
+                    metrics = order_metrics(tables[i], order, k, mrr_at)
                     per_question[repeat, i] = [metrics[f"recall@{k}"], metrics[f"ndcg@{k}"], metrics["mrr"]]
                 fold_recalls.append(float(per_question[repeat, test_idx, 0].mean()))
         mean_q = per_question.mean(axis=0)
@@ -239,11 +252,12 @@ def cross_validate(
 def choose(cv: Sequence[Mapping[str, Any]], rules: Mapping[str, Mapping[str, Any]], k: int) -> dict[str, Any]:
     """Выбор по правилу из DESIGN.md: лучшая модель против лучшего правила по Recall@k на train."""
     key = f"recall@{k}"
-    best_model = cv[0]
-    for row in cv[1:]:
-        # Строго больше с допуском: при ничьей остаётся более ранний (более простой) кандидат.
-        if row[key] > best_model[key] + TIE_TOLERANCE:
-            best_model = row
+    # Ничья (в пределах TIE_TOLERANCE) — в пользу меньшей глубины, а при равной глубине — более раннего
+    # в сетке. Сравнивать «строго больше по порядку сетки» нельзя: сетка идёт по функциям потерь,
+    # и при ничьей между потерями победила бы более глубокая модель.
+    best_value = max(row[key] for row in cv)
+    tied = [row for row in cv if row[key] >= best_value - TIE_TOLERANCE]
+    best_model = min(tied, key=lambda row: (row["params"].get("depth", 0), cv.index(row)))
     best_rule_name = max(rules, key=lambda name: (rules[name][key], -RULES.index(name)))
     margin = best_model[key] - rules[best_rule_name][key]
     chosen_kind = "model" if margin >= RULE_MARGIN else "rule"
@@ -263,11 +277,14 @@ def choose(cv: Sequence[Mapping[str, Any]], rules: Mapping[str, Mapping[str, Any
 
 
 def evaluate_on_dev(
-    tables: Sequence[QueryTable], order_fn: Callable[[QueryTable], Sequence[int]], k: int
+    tables: Sequence[QueryTable],
+    order_fn: Callable[[QueryTable], Sequence[int]],
+    k: int,
+    mrr_at: int | None = None,
 ) -> dict[str, Any]:
     """Метрики A (порядок реранкера) и выбранного порядка на одних вопросах dev, разницы и вердикт правила."""
-    baseline = evaluate_orders(tables, lambda table: range(len(table.labels)), k)
-    chosen = evaluate_orders(tables, order_fn, k)
+    baseline = evaluate_orders(tables, lambda table: range(len(table.labels)), k, mrr_at)
+    chosen = evaluate_orders(tables, order_fn, k, mrr_at)
     diffs = {}
     for metric in (f"recall@{k}", f"ndcg@{k}", "mrr"):
         result = paired_bootstrap_diff(
@@ -307,7 +324,11 @@ class RankerTrainReport:
     choice: dict[str, Any]
     dev: dict[str, Any]
     importance: dict[str, float] = field(default_factory=dict)
+    importance_kind: str = IMPORTANCE_KIND
+    mrr_at: int | None = None
     model_path: str | None = None
+    # Модель отвергнута на dev, а боевой конфиг уже на LTR: файл записан рядом, а не поверх боевого.
+    saved_as_candidate: bool = False
 
     @property
     def switch_recommended(self) -> bool:
@@ -326,6 +347,7 @@ def fit_ranker(
     k: int,
     grid: Sequence[Mapping[str, Any]] | None = None,
     seed: int = 0,
+    mrr_at: int | None = None,
 ) -> tuple[RankerModel | None, RankerTrainReport]:
     """Ядро обучения на готовых таблицах: правила и CV на train, выбор, финальная модель, сравнение на dev.
 
@@ -333,12 +355,14 @@ def fit_ranker(
     """
     _require_split(train, TRAIN_SPLIT, "обучающие вопросы")
     _require_split(dev, "dev", "вопросы для решения")
-    baseline_train = _without_per_question(evaluate_orders(train, lambda table: range(len(table.labels)), k))
+    baseline_train = _without_per_question(
+        evaluate_orders(train, lambda table: range(len(table.labels)), k, mrr_at)
+    )
     rules = {
-        name: _without_per_question(evaluate_orders(train, lambda t, n=name: rule_order(n, t), k))
+        name: _without_per_question(evaluate_orders(train, lambda t, n=name: rule_order(n, t), k, mrr_at))
         for name in RULES
     }
-    cv = cross_validate(train, k, grid=grid, seed=seed)
+    cv = cross_validate(train, k, grid=grid, seed=seed, mrr_at=mrr_at)
     choice = choose(cv, rules, k)
 
     model: RankerModel | None = None
@@ -346,7 +370,9 @@ def fit_ranker(
     if choice["kind"] == "model":
         estimator = _fit(train, {**choice["params"], "random_seed": seed})
         model = RankerModel(estimator, params=choice["params"])
-        values = estimator.get_feature_importance(type="PredictionValuesChange")
+        # LossFunctionChange: насколько ухудшается функция потерь ранжирования без признака. Для ранкеров
+        # это осмысленная мера; PredictionValuesChange смотрит на сдвиг score, а у ранкера важен только порядок.
+        values = estimator.get_feature_importance(data=_pool(train), type=IMPORTANCE_KIND)
         importance = {name: float(value) for name, value in zip(FEATURE_NAMES, values, strict=True)}
 
         def order_fn(table: QueryTable) -> Sequence[int]:
@@ -364,8 +390,9 @@ def fit_ranker(
         rules=rules,
         cv=cv,
         choice=choice,
-        dev=evaluate_on_dev(dev, order_fn, k),
+        dev=evaluate_on_dev(dev, order_fn, k, mrr_at),
         importance=importance,
+        mrr_at=mrr_at,
     )
     return model, report
 
@@ -385,10 +412,21 @@ def train_ranker(
     Модель сохраняется, если выбран CatBoost, — даже когда на dev правило переключения не выполнено:
     шаг сетки с LTR должен воспроизводиться, а отрицательный результат — проверяться. Решение о боевом
     конфиге показывает ``RankerTrainReport.switch_recommended``. Путь — ``out`` или ``ltr.model_path``.
+
+    Одно исключение: боевой конфиг уже на LTR (``ltr.enabled``), путь — его ``ltr.model_path``, а новая
+    модель на dev правило не прошла. Тогда файл пишется рядом (``<имя>.candidate.json``): отвергнутая
+    модель не должна молча попасть в сервис при следующем старте.
     """
+    if not catboost_available():
+        # До часового прохода по кандидатам, а не после него.
+        raise ImportError(f"для модели ранжирования нужен пакет catboost: {CATBOOST_INSTALL_HINT}")
     target = out if out is not None else cfg.ltr.model_path
     if not target:
         raise ValueError("не задан путь к модели: ltr.model_path в конфиге или --out")
+    if Path(target).suffix.lower() != ".json":
+        raise ValueError(
+            f"путь к модели должен оканчиваться на .json (деревья лягут рядом в .cbm), а не {target}"
+        )
     docs = list(docs) if docs is not None else load_corpus(cfg.corpus_dir)
     train = list(train) if train is not None else load_gold(cfg.train_path)
     gold = list(gold) if gold is not None else load_gold(cfg.gold_path)
@@ -412,7 +450,9 @@ def train_ranker(
     pipeline = RAGPipeline.from_config(feature_cfg, docs=docs)
     train_tables = candidate_table(pipeline, train, docs)
     dev_tables = candidate_table(pipeline, dev, docs)
-    model, report = fit_ranker(train_tables, dev_tables, cfg.retrieval.top_k, grid=grid, seed=seed)
+    model, report = fit_ranker(
+        train_tables, dev_tables, cfg.retrieval.top_k, grid=grid, seed=seed, mrr_at=eval_mrr_cutoff(cfg)
+    )
     if model is None:
         return report
 
@@ -430,13 +470,49 @@ def train_ranker(
                 "choice": report.choice,
             },
             "dev_report": report.dev,
-            "importance": report.importance,
+            "mrr_at": report.mrr_at,
+            "importance": {"kind": report.importance_kind, "values": report.importance},
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "versions": _library_versions(),
         }
     )
+    served = cfg.ltr.model_path is not None and Path(target) == Path(cfg.ltr.model_path)
+    if cfg.ltr.enabled and served and not report.switch_recommended:
+        target = Path(target).with_name(f"{Path(target).stem}.candidate.json")
+        report.saved_as_candidate = True
     report.model_path = str(model.save(target))
     return report
+
+
+def eval_mrr_cutoff(cfg: AppConfig) -> int:
+    """Длина выдачи, по которой ``kbrag eval`` считает MRR: ``max(eval.k_values)`` (не меньше top_k)."""
+    return max([*cfg.eval.k_values, cfg.retrieval.top_k])
+
+
+def out_of_fold_rankers(
+    pipeline: RAGPipeline,
+    items: Sequence[GoldItem],
+    docs: Sequence[Document],
+    params: Mapping[str, Any],
+    seed: int = 0,
+) -> dict[str, RankerModel]:
+    """Для каждого вопроса ``items`` — модель ранжирования, которая его не видела (out-of-fold).
+
+    Зачем. Модель отказа учится на признаках выдачи, а выдачу задаёт ранкер, обученный на тех же
+    train-вопросах. Для «своих» вопросов ранкер ставит нужный фрагмент выше, чем сделает на новых,
+    и признаки train выходят оптимистичнее, чем в сервисе, — классическая утечка при стекинге моделей.
+    Поэтому вопросы делятся на CV_SPLITS фолдов, и выдачу вопроса из фолда f строит ранкер, обученный
+    без фолда f (с теми же гиперпараметрами, что боевой). Вопросы без ответа тоже раскладываются
+    по фолдам: так у обоих классов выдача от модели на ~80% данных, и разница классов не подмешана.
+    """
+    tables = {table.qid: table for table in candidate_table(pipeline, items, docs)}
+    fold_of = _query_folds(len(items), seed)
+    rankers: dict[int, RankerModel] = {}
+    for fold in range(CV_SPLITS):
+        seen = [items[i].qid for i in range(len(items)) if fold_of[i] != fold and items[i].qid in tables]
+        estimator = _fit([tables[qid] for qid in seen], {**params, "random_seed": seed})
+        rankers[fold] = RankerModel(estimator, params=params, metadata={"trained_on": seen})
+    return {item.qid: rankers[int(fold_of[i])] for i, item in enumerate(items)}
 
 
 # ---------------------------------------------------------------------------
@@ -446,10 +522,15 @@ def train_ranker(
 
 def _fit(tables: Sequence[QueryTable], params: Mapping[str, Any]) -> Any:
     """CatBoostRanker на кандидатах вопросов: строки одного вопроса идут подряд и имеют общий group_id."""
+    return make_ranker(params).fit(_pool(tables))
+
+
+def _pool(tables: Sequence[QueryTable]) -> Any:
+    """CatBoost Pool: строки одного вопроса подряд с общим group_id (так ранкер знает, кого с кем сравнивать)."""
     matrix = np.vstack([table.features for table in tables])
     labels = np.concatenate([table.labels for table in tables])
     groups = np.concatenate([np.full(len(table.labels), i) for i, table in enumerate(tables)])
-    return make_ranker(params).fit(matrix, labels, group_id=groups)
+    return import_catboost().Pool(matrix, labels, group_id=groups)
 
 
 def _query_folds(n: int, seed: int) -> np.ndarray:

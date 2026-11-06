@@ -31,6 +31,7 @@ from kbrag.ltr import (
     load_ranker,
     make_ranker,
 )
+from kbrag.ltr import train as ltr_train
 from kbrag.ltr.train import (
     RULE_DOC_CAP,
     RULE_MARGIN,
@@ -41,6 +42,7 @@ from kbrag.ltr.train import (
     fit_ranker,
     order_by_scores,
     order_metrics,
+    out_of_fold_rankers,
     rule_order,
     train_ranker,
 )
@@ -201,11 +203,37 @@ def test_rank_orders_by_model_score_and_keeps_previous_details() -> None:
         scored("a", "B", 1.0, rerank=1.0),
     ]
     ranked = model.rank("отпуск", candidates)
-    # Ничья 0.9/0.9 — по chunk_id; прежние детали сохранены, score модели и прежний score видны.
-    assert [item.chunk.chunk_id for item in ranked] == ["a", "b", "c"]
-    assert ranked[0].details["ltr"] == 0.9 and ranked[0].details["pre_ltr"] == 1.0
-    assert ranked[0].details["rerank"] == 1.0 and ranked[0].source == "ltr"
+    # Ничья 0.9/0.9 — в порядке, в котором пришли (b раньше a); прежние детали и прежний score видны.
+    assert [item.chunk.chunk_id for item in ranked] == ["b", "a", "c"]
+    assert ranked[0].details["ltr"] == 0.9 and ranked[0].details["pre_ltr"] == 2.0
+    assert ranked[0].details["rerank"] == 2.0 and ranked[0].source == "ltr"
     assert model.rank("отпуск", []) == []
+
+
+def test_ties_are_broken_the_same_way_in_training_and_in_serving() -> None:
+    # Выбор модели и вердикт на dev считают порядок через order_by_scores, сервис — через rank:
+    # при равных score они обязаны дать один и тот же порядок, иначе dev предсказывал бы не то.
+    class Ties:
+        def predict(self, matrix: np.ndarray) -> np.ndarray:
+            return np.array([0.5, 1.0, 0.5, 1.0, 0.0])
+
+    model = RankerModel(Ties(), params={"loss_function": "PairLogit", "depth": 2})
+    candidates = [scored(f"c{i}", "A", 5.0 - i, rerank=5.0 - i) for i in range(5)]
+    served = [item.chunk.chunk_id for item in model.rank("отпуск", candidates)]
+    trained = [candidates[i].chunk.chunk_id for i in order_by_scores(model.score(np.zeros((5, 1))))]
+    assert served == trained == ["c1", "c3", "c0", "c2", "c4"]
+
+
+def test_model_file_errors_are_value_errors(tmp_path: Path) -> None:
+    model = trained_toy_model()
+    with pytest.raises(ValueError, match=".json"):
+        model.save(tmp_path / "ltr.cbm")  # иначе деревья легли бы поверх паспорта
+    path = model.save(tmp_path / "ltr.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["catboost"] = "ltr.cbm"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="объектами"):
+        RankerModel.load(path)
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +275,13 @@ def test_choose_takes_the_model_only_with_a_margin_over_the_best_rule() -> None:
     close = [{"name": "m", "params": {}, "recall@5": 0.900 + RULE_MARGIN / 2}]
     choice = choose(close, rules, 5)
     assert choice["kind"] == "rule" and choice["name"] == RULE_RRF and choice["params"] == {}
+
+    # Ничья между функциями потерь: побеждает меньшая глубина, а не та, что раньше в сетке.
+    across = [
+        {"name": "Y-d6", "params": {"loss_function": "YetiRank", "depth": 6}, "recall@5": 0.95},
+        {"name": "P-d3", "params": {"loss_function": "PairLogit", "depth": 3}, "recall@5": 0.95},
+    ]
+    assert choose(across, rules, 5)["name"] == "P-d3"
 
 
 def test_dev_verdict_follows_the_pre_registered_rule() -> None:
@@ -304,29 +339,123 @@ def reverse_model(cfg: AppConfig, docs: list[Document]) -> RankerModel:
     )
 
 
-def test_train_ranker_end_to_end(
-    tmp_path: Path, mini_corpus_dir: Path, mini_gold_path: Path, mini_gold_records: list[dict]
-) -> None:
-    cfg = make_cfg(tmp_path, mini_corpus_dir, mini_gold_path)
+def run_train_ranker(cfg: AppConfig, gold_records: list[dict]):
     docs = load_corpus(cfg.corpus_dir)
-    report = train_ranker(
-        cfg, docs=docs, train=items(train_records()), gold=items(mini_gold_records), grid=SMALL_GRID
+    return docs, train_ranker(
+        cfg, docs=docs, train=items(train_records()), gold=items(gold_records), grid=SMALL_GRID
     )
+
+
+def test_train_ranker_saves_a_model_the_service_accepts(
+    tmp_path: Path,
+    mini_corpus_dir: Path,
+    mini_gold_path: Path,
+    mini_gold_records: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # На мини-корпусе выбор между моделью и правилом зависит от синтетики, поэтому ветку задаём явно:
+    # с отрицательным запасом модель выбирается всегда.
+    monkeypatch.setattr("kbrag.ltr.train.RULE_MARGIN", -1.0)
+    cfg = make_cfg(tmp_path, mini_corpus_dir, mini_gold_path)
+    docs, report = run_train_ranker(cfg, mini_gold_records)
     assert report.n_train == 12  # из 22 обучающих вопросов 10 без ответа — ранжировать там нечего
-    assert report.n_dev >= 1 and report.k == cfg.retrieval.top_k
+    assert report.n_dev >= 1 and report.k == cfg.retrieval.top_k and report.mrr_at == 10
     assert set(report.rules) == {RULE_RRF, RULE_DOC_CAP} and len(report.cv) == 1
     assert set(report.dev["criteria"]) == {"recall_higher", "ndcg_not_lower", "mrr_not_lower"}
-    if report.choice["kind"] == "rule":
-        assert report.model_path is None
-        return
+    assert report.choice["kind"] == "model" and report.model_path is not None
     data = json.loads(Path(report.model_path).read_text(encoding="utf-8"))
     assert data["fingerprint"] == candidates_fingerprint(cfg)
     assert data["corpus_sha256"] == corpus_fingerprint(docs)
-    for key in ("train_sha256", "dev_sha256", "train_report", "dev_report", "importance", "versions"):
+    assert data["importance"]["kind"] == "LossFunctionChange" and data["mrr_at"] == 10
+    for key in ("train_sha256", "dev_sha256", "train_report", "dev_report", "versions"):
         assert key in data
     # Сервис принимает модель, обученную для его конфига.
     enabled = cfg.model_copy(update={"ltr": cfg.ltr.model_copy(update={"enabled": True})})
     assert load_ranker(enabled, corpus_sha256=corpus_fingerprint(docs)).name == report.choice["name"]
+
+
+def test_train_ranker_writes_nothing_when_a_rule_wins(
+    tmp_path: Path,
+    mini_corpus_dir: Path,
+    mini_gold_path: Path,
+    mini_gold_records: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("kbrag.ltr.train.RULE_MARGIN", float("inf"))
+    cfg = make_cfg(tmp_path, mini_corpus_dir, mini_gold_path)
+    _, report = run_train_ranker(cfg, mini_gold_records)
+    assert report.choice["kind"] == "rule" and report.model_path is None
+    assert not Path(cfg.ltr.model_path).exists()
+
+
+def test_rejected_model_does_not_replace_the_served_one(
+    tmp_path: Path,
+    mini_corpus_dir: Path,
+    mini_gold_path: Path,
+    mini_gold_records: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Боевой конфиг уже на LTR, а новая модель не прошла dev: боевой файл остаётся, новая ложится рядом.
+    monkeypatch.setattr("kbrag.ltr.train.RULE_MARGIN", -1.0)
+    real_dev = ltr_train.evaluate_on_dev
+    monkeypatch.setattr(
+        "kbrag.ltr.train.evaluate_on_dev",
+        lambda *args, **kwargs: {**real_dev(*args, **kwargs), "switch": False},
+    )
+    cfg = make_cfg(tmp_path, mini_corpus_dir, mini_gold_path, ltr={"enabled": True})
+    served = Path(cfg.ltr.model_path)
+    served.write_text("{}", encoding="utf-8")
+    _, report = run_train_ranker(cfg, mini_gold_records)
+    assert report.saved_as_candidate and report.model_path.endswith("ltr.candidate.json")
+    assert served.read_text(encoding="utf-8") == "{}"
+
+
+def test_out_of_fold_rankers_never_rank_a_question_they_were_trained_on(
+    tmp_path: Path, mini_corpus_dir: Path, mini_gold_path: Path
+) -> None:
+    cfg = make_cfg(tmp_path, mini_corpus_dir, mini_gold_path)
+    docs = load_corpus(cfg.corpus_dir)
+    pipeline = RAGPipeline.from_config(cfg, docs=docs)
+    train = items(train_records())
+    rankers = out_of_fold_rankers(pipeline, train, docs, SMALL_GRID[0])
+    assert set(rankers) == {item.qid for item in train}  # и вопросы без ответа тоже
+    assert len({id(model) for model in rankers.values()}) == 5  # по ранкеру на фолд
+    for qid, model in rankers.items():
+        assert qid not in model.metadata["trained_on"]
+
+
+def test_abstention_training_with_ltr_uses_out_of_fold_rankings(
+    tmp_path: Path,
+    mini_corpus_dir: Path,
+    mini_gold_path: Path,
+    mini_gold_records: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from abstention_helpers import DEV_UNANSWERABLE
+
+    from kbrag.abstention import train as abstention_train
+
+    cfg = make_cfg(
+        tmp_path,
+        mini_corpus_dir,
+        mini_gold_path,
+        ltr={"enabled": True},
+        abstention={"model_path": (tmp_path / "abstention.json").as_posix()},
+    )
+    docs = load_corpus(cfg.corpus_dir)
+    monkeypatch.setattr("kbrag.pipeline.load_ranker", lambda *_args, **_kwargs: reverse_model(cfg, docs))
+    seen: dict[str, object] = {}
+    real_fit = abstention_train.fit_abstention
+
+    def spy(*args, **kwargs):
+        seen["train_rankers"] = kwargs.get("train_rankers")
+        return real_fit(*args, **kwargs)
+
+    monkeypatch.setattr(abstention_train, "fit_abstention", spy)
+    gold = items([*mini_gold_records, DEV_UNANSWERABLE])
+    abstention_train.train_abstention(cfg, model="logreg", docs=docs, train=items(train_records()), gold=gold)
+    rankers = seen["train_rankers"]
+    assert rankers is not None and set(rankers) == {item["id"] for item in train_records()}
 
 
 def test_pipeline_with_ltr_refuses_a_missing_or_foreign_model(
@@ -364,6 +493,39 @@ def test_pipeline_uses_the_ranker_and_reports_it(
     assert "rank_ms" in timings and all(r.source == "ltr" for r in retrieved)
     with TestClient(create_app(cfg=cfg, pipeline=pipeline)) as client:
         assert client.get("/health").json()["ranking"] == "ltr:catboost:PairLogit-d1"
+
+
+def test_reranker_and_ranker_together(tmp_path: Path, mini_corpus_dir: Path, mini_gold_path: Path) -> None:
+    # Боевое сочетание: реранкер оценивает всех кандидатов, ранкер переставляет всех, выдача режется до top_k.
+    from test_pipeline import ReverseReranker
+
+    from kbrag.generation import ExtractiveGenerator
+    from kbrag.ingest import chunk_corpus, make_chunker
+    from kbrag.retrieval import build_retriever
+
+    cfg = make_cfg(tmp_path, mini_corpus_dir, mini_gold_path, retrieval={"top_k": 2, "candidates_k": 5})
+    docs = load_corpus(cfg.corpus_dir)
+    chunks = chunk_corpus(docs, make_chunker(cfg.chunking))
+    retriever = build_retriever(cfg)
+    retriever.index(chunks)
+    seen_rows: list[int] = []
+
+    class Recorder:
+        def predict(self, matrix: np.ndarray) -> np.ndarray:
+            seen_rows.append(matrix.shape[0])
+            return np.arange(matrix.shape[0], dtype=float)
+
+    ranker = RankerModel(Recorder(), params={"loss_function": "PairLogit", "depth": 1})
+    reranker = ReverseReranker()
+    pipeline = RAGPipeline(
+        cfg, retriever, ExtractiveGenerator(), reranker=reranker, ranker=ranker, chunks=chunks
+    )
+    retrieved, timings = pipeline.retrieve("Сколько дней отпуска?")
+    candidates, _ = pipeline.candidates("Сколько дней отпуска?")
+    assert seen_rows[0] == len(candidates) == reranker.n_candidates_seen[0] > cfg.retrieval.top_k
+    assert all("rerank" in item.details for item in candidates)
+    assert [r.chunk.chunk_id for r in retrieved] == [c.chunk.chunk_id for c in reversed(candidates)][:2]
+    assert {"rerank_ms", "rank_ms"} <= set(timings) and pipeline.ranking_method == "ltr:catboost:PairLogit-d1"
 
 
 def test_ranking_method_without_ltr(tmp_path: Path, mini_corpus_dir: Path, mini_gold_path: Path) -> None:
@@ -424,8 +586,12 @@ def test_eval_runs_through_the_ranker(
     docs = load_corpus(cfg.corpus_dir)
     monkeypatch.setattr("kbrag.pipeline.load_ranker", lambda *_args, **_kwargs: reverse_model(cfg, docs))
     result = run_experiment(cfg, name="ltr", docs=docs)
-    # Оценка идёт через тот же retrieve, что и сервис: в per_question — выдача ранкера.
-    assert result.per_question and result.metrics["test"]["n_questions"] >= 1
+    # Оценка идёт через тот же retrieve, что и сервис: в per_question — выдача ранкера (задом наперёд).
+    pipeline = RAGPipeline.from_config(cfg, docs=docs)
+    row = result.per_question[0]
+    candidates, _ = pipeline.candidates(row["question"], top_k=10)
+    expected = [c.chunk.chunk_id for c in reversed(candidates)][: len(row["retrieved"])]
+    assert row["retrieved"] == expected
 
 
 def test_cli_train_ranker(
@@ -441,9 +607,16 @@ def test_cli_train_ranker(
     config_path = tmp_path / "cfg.yaml"
     config_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
     monkeypatch.setattr("kbrag.ltr.train.model_grid", lambda *_args, **_kwargs: SMALL_GRID)
+    monkeypatch.setattr("kbrag.ltr.train.RULE_MARGIN", -1.0)  # ветка с моделью: печать CV, признаков, пути
     assert main(["train-ranker", "--config", str(config_path)]) == EXIT_OK
     out = capsys.readouterr().out
-    assert "Правило из docs/DESIGN.md" in out and "выбрано:" in out
+    assert "Правило из docs/DESIGN.md" in out and "выбрано:" in out and "MRR@10" in out
+    assert "Модель сохранена" in out and "LossFunctionChange" in out
+
+    monkeypatch.setattr("kbrag.ltr.train.RULE_MARGIN", float("inf"))  # ветка с правилом
+    assert main(["train-ranker", "--config", str(config_path)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "Файл модели не записан" in out and "прежняя модель" in out
 
     data["ltr"]["model_path"] = None
     config_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")

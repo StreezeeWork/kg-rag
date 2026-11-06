@@ -84,7 +84,7 @@ def import_catboost() -> Any:
         import catboost
     except ImportError as exc:
         raise ImportError(
-            f"для модели отказа catboost нужен пакет catboost: {CATBOOST_INSTALL_HINT}"
+            f"для моделей на CatBoost (отказ, ранжирование) нужен пакет catboost: {CATBOOST_INSTALL_HINT}"
         ) from exc
     return catboost
 

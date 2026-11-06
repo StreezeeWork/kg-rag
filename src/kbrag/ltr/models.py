@@ -100,7 +100,10 @@ class RankerModel:
     def rank(
         self, question: str, candidates: Sequence[ScoredChunk], *, with_header: bool = True
     ) -> list[ScoredChunk]:
-        """Новый порядок всех кандидатов по score модели (при равенстве — по ``chunk_id``).
+        """Новый порядок всех кандидатов по score модели (при равенстве — в порядке, в котором пришли).
+
+        Tie-break тот же, что при обучении и выборе модели (``ltr.train.order_by_scores``): стабильная
+        сортировка сохраняет порядок реранкера среди равных score.
 
         Прежние детали (bm25, dense, rerank, ранги) переносятся, score модели кладётся в ``details["ltr"]``,
         а прежний score — в ``details["pre_ltr"]``: так видно, как модель изменила порядок.
@@ -117,7 +120,7 @@ class RankerModel:
             )
             for item, score in zip(candidates, scores, strict=True)
         ]
-        ranked.sort(key=lambda item: (-item.score, item.chunk.chunk_id))
+        ranked.sort(key=lambda item: -item.score)  # sort в Python стабильная
         return ranked
 
     # --- файл ---
@@ -125,6 +128,9 @@ class RankerModel:
     def save(self, path: str | Path) -> Path:
         """Пишет JSON и ``.cbm`` рядом; ``sha256`` деревьев в JSON связывает два файла одного обучения."""
         target = Path(path)
+        if target.suffix.lower() != ".json":
+            # Иначе with_suffix(".cbm") совпал бы с самим JSON (model.cbm), и деревья затёрли бы паспорт.
+            raise ValueError(f"файл модели должен оканчиваться на .json, а не {target.name}")
         target.parent.mkdir(parents=True, exist_ok=True)
         cbm_path = target.with_suffix(".cbm")
         self._model.save_model(str(cbm_path), format="cbm")
@@ -152,6 +158,10 @@ class RankerModel:
                 f"версия формата {data.get('format_version')!r}, а этот код читает {FORMAT_VERSION}"
             )
         info = data.get("catboost") or {}
+        params = data.get("params") or {}
+        names = data.get("feature_names") or []
+        if not isinstance(info, dict) or not isinstance(params, dict) or not isinstance(names, list):
+            raise ValueError("поля catboost и params должны быть объектами, а feature_names — списком")
         # Только имя файла, без каталогов: JSON не должен указывать на произвольный путь на диске.
         cbm_path = source.parent / Path(str(info.get("file", ""))).name
         if not cbm_path.is_file():
@@ -165,8 +175,8 @@ class RankerModel:
             raise ValueError(f"не удалось прочитать деревья CatBoost из {cbm_path}: {exc}") from exc
         return cls(
             model,
-            params=data.get("params") or {},
-            feature_names=[str(name) for name in data.get("feature_names") or []],
+            params=params,
+            feature_names=[str(name) for name in names],
             metadata={key: value for key, value in data.items() if key not in _STRUCTURE_KEYS},
         )
 
