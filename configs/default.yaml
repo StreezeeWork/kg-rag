@@ -59,8 +59,8 @@ rerank:
 ltr:
   enabled: true         # learning-to-rank: финальный порядок кандидатов задаёт CatBoost-ранкер (`kbrag train-ranker
                         # --config configs/default.yaml`). Включён по правилу из docs/DESIGN.md, записанному до обучения:
-                        # на dev Recall@5 0.938 против 0.920 у порядка реранкера, nDCG@5 0.877 против 0.853, MRR 0.901
-                        # против 0.884 (ДИ разниц на 56 вопросах включают 0). Test — только отчёт: docs/results/ltr.md
+                        # на dev Recall@5 0.938 против 0.920 у порядка реранкера, nDCG@5 0.877 против 0.853, MRR@10
+                        # 0.898 против 0.883 (ДИ разниц на 56 вопросах включают 0). Test — только отчёт: docs/results/ltr.md
   model_path: reports/ltr_default.json  # файл модели ранжирования (+ .cbm рядом); нет файла — ошибка при старте
 
 generation:
