@@ -81,7 +81,8 @@ abstention:
                         # configs/default.yaml`). Решение по правилу из docs/DESIGN.md, записанному ДО обучения;
                         # после перехода на LTR модель переобучена (выдача train — out-of-fold-ранкерами) и правило
                         # проверено заново: на dev balanced accuracy 0.862 против 0.766 у порога, AUROC 0.904 против
-                        # 0.793, при 27 отказах ловит 13/15 против 12/15. Test — только отчёт: docs/results/ltr.md.
+                        # 0.793, при 27 отказах ловит 13/15 против 12/15. После перехода на цену ошибок (miss_cost ниже)
+                        # цена на dev 12 против 21 у порога. Test — только отчёт: docs/results/ltr.md.
                         # Нужен catboost (`pip install -e .[classic]`); нет файла модели — откат на порог ниже.
   threshold: auto       # запасной порог по уверенности: подбирается на dev, сервис берёт его, только если модели
                         # отказа нет. Сохраняет `make eval CONFIG=configs/default.yaml NAME=neural_threshold METHOD=threshold`
