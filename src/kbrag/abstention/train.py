@@ -275,8 +275,13 @@ def choose_candidate(cv_results: Sequence[Mapping[str, Any]]) -> Mapping[str, An
 # ---------------------------------------------------------------------------
 
 
-def tune_decision_threshold(probabilities: Sequence[float], y: Sequence[int]) -> float | None:
-    """Порог для правила «отказ, если p ≥ порога», подобранный по balanced accuracy.
+def tune_decision_threshold(
+    probabilities: Sequence[float], y: Sequence[int], miss_cost: float | None = None
+) -> float | None:
+    """Порог для правила «отказ, если p ≥ порога», подобранный по balanced accuracy (или по цене ошибок).
+
+    ``miss_cost`` — как у ``metrics.choose_threshold``: None — balanced accuracy, число — минимум цены
+    «ложные отказы + miss_cost × ответы на вопросы без ответа».
 
     Переиспользуем ``metrics.choose_threshold`` — тот же критерий, что у порогового метода, чтобы
     сравнение было честным. Но у него обратная шкала: он отвечает, если «уверенность» ≥ t. Поэтому
@@ -290,7 +295,7 @@ def tune_decision_threshold(probabilities: Sequence[float], y: Sequence[int]) ->
     None — если ни один порог не лучше «никогда не отказываться» (или на dev один класс).
     """
     answerable = [int(label) == 0 for label in y]
-    threshold = choose_threshold([1.0 - float(p) for p in probabilities], answerable)
+    threshold = choose_threshold([1.0 - float(p) for p in probabilities], answerable, miss_cost)
     return None if threshold is None else 1.0 - threshold
 
 
@@ -312,6 +317,7 @@ def evaluate_on_dev(
     baseline_confidence: Sequence[float],
     y: Sequence[int],
     decision_threshold: float | None,
+    miss_cost: float | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Классификатор против бейзлайна на dev: AUROC с 95% ДИ и метрики решения при своём пороге.
 
@@ -331,22 +337,37 @@ def evaluate_on_dev(
         "auroc_ci95": _as_list(auroc_ci(clf_confidence, answerable)),
         "threshold": decision_threshold,
     }
+    clf_abstained = [False] * len(p)
     if decision_threshold is not None:
-        classifier.update(decision_metrics([value >= decision_threshold for value in p], y))
+        clf_abstained = [value >= decision_threshold for value in p]
+        classifier.update(decision_metrics(clf_abstained, y))
 
     confidence = [None if np.isnan(value) else float(value) for value in baseline_confidence]
-    baseline_threshold = choose_threshold(confidence, answerable)
+    baseline_threshold = choose_threshold(confidence, answerable, miss_cost)
     baseline: dict[str, Any] = {
         "auroc": auroc(confidence, answerable),
         "auroc_ci95": _as_list(auroc_ci(confidence, answerable)),
         "threshold": baseline_threshold,
     }
+    base_abstained = [False] * len(confidence)
     if baseline_threshold is not None:
-        abstained = [value is None or value < baseline_threshold for value in confidence]
-        baseline.update(decision_metrics(abstained, y))
+        base_abstained = [value is None or value < baseline_threshold for value in confidence]
+        baseline.update(decision_metrics(base_abstained, y))
+    if miss_cost is not None:
+        # Цена при своём пороге (нет порога — «никогда не отказываться»): по ней решает правило из DESIGN.md.
+        classifier["cost"] = _cost(clf_abstained, answerable, miss_cost)
+        baseline["cost"] = _cost(base_abstained, answerable, miss_cost)
     diff = auroc_diff_ci(clf_confidence, confidence, answerable)
     auroc_diff = {"value": diff[0], "ci95": [diff[1], diff[2]]} if diff is not None else {}
     return {"classifier": classifier, "baseline": baseline, "auroc_diff": auroc_diff}
+
+
+def _cost(abstained: Sequence[bool], answerable: Sequence[bool], miss_cost: float) -> float:
+    """Ложные отказы + miss_cost × ответы на вопросы без ответа (то же, что ``metrics.decision_cost``)."""
+    pairs = list(zip(abstained, answerable, strict=True))
+    return sum(1 for a, ans in pairs if a and ans) + miss_cost * sum(
+        1 for a, ans in pairs if not a and not ans
+    )
 
 
 def _as_list(interval: tuple[float, float] | None) -> list[float] | None:
@@ -403,6 +424,20 @@ class TrainReport:
     n_dev: int
     n_dev_unanswerable: int
     model_path: str | None = None
+    # Критерий рабочей точки: None — balanced accuracy; число — цена ответа на вопрос без ответа
+    # (ложный отказ стоит 1). С ним в ``dev`` есть цена обеих веток (``cost``).
+    miss_cost: float | None = None
+
+    @property
+    def cheaper_than_baseline_dev(self) -> bool | None:
+        """Правило рабочей точки из DESIGN.md: цена классификатора на dev строго меньше, чем у порога.
+
+        None — критерий цены не задан (``miss_cost`` нет), правило неприменимо.
+        """
+        if self.miss_cost is None:
+            return None
+        clf, base = self.dev["classifier"].get("cost"), self.dev["baseline"].get("cost")
+        return clf is not None and base is not None and clf < base - TIE_TOLERANCE
 
     @property
     def beats_baseline_cv(self) -> bool:
@@ -469,7 +504,9 @@ def fit_abstention(
     # Предсказания dev — через ту же обёртку AbstentionModel, что в сервисе (для logreg — numpy-код из JSON).
     probe = AbstentionModel.from_estimator(best["model_type"], estimator, 0.5, params=best["params"])
     p_dev = probe.predict_proba(rows_dev)
-    threshold = tune_decision_threshold(p_dev, y_dev)
+    # Критерий рабочей точки — из конфига (abstention.miss_cost): None — balanced accuracy, число — цена ошибок.
+    miss_cost = pipeline.cfg.abstention.miss_cost
+    threshold = tune_decision_threshold(p_dev, y_dev, miss_cost)
     baseline_dev = features_to_matrix(rows_dev, [baseline_feature])[:, 0]
     kind, importance = feature_importance(best["model_type"], estimator, matrix_train)
 
@@ -480,7 +517,8 @@ def fit_abstention(
         baseline_feature=baseline_feature,
         cv=cv,
         decision_threshold=threshold,
-        dev=evaluate_on_dev(p_dev, baseline_dev, y_dev, threshold),
+        dev=evaluate_on_dev(p_dev, baseline_dev, y_dev, threshold, miss_cost),
+        miss_cost=miss_cost,
         importance_kind=kind,
         importance=importance,
         n_train=len(train),
@@ -561,6 +599,11 @@ def train_abstention(
                 "candidates": report.cv,
             },
             "dev_metrics": {**report.dev, "beats_baseline_dev": report.beats_baseline_dev},
+            "operating_point": {
+                "criterion": "balanced_accuracy" if report.miss_cost is None else "cost",
+                "miss_cost": report.miss_cost,
+                "cheaper_than_baseline_dev": report.cheaper_than_baseline_dev,
+            },
             "importance": {"kind": report.importance_kind, "values": report.importance},
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "versions": _library_versions(report.model_type),

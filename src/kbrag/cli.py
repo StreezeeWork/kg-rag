@@ -396,8 +396,14 @@ def _print_train_report(report: Any) -> None:
     print("  (бейзлайн на train-CV — только справка: сравнение с ним, по которому решают, — на dev ниже)")
 
     threshold = report.decision_threshold
+    miss_cost = getattr(report, "miss_cost", None)
+    criterion = (
+        "balanced accuracy"
+        if miss_cost is None
+        else f"минимум цены «ложные отказы + {miss_cost:g} × ответы на вопросы без ответа»"
+    )
     print(
-        "\nПорог решения (подобран на dev по balanced accuracy): "
+        f"\nПорог решения (подобран на dev, критерий — {criterion}): "
         + ("не подобран" if threshold is None else f"отказ, если p ≥ {threshold:.4f}")
     )
     clf, base = report.dev["classifier"], report.dev["baseline"]
@@ -418,6 +424,14 @@ def _print_train_report(report: Any) -> None:
         f"  {'порог':<24}{format_number(clf.get('threshold')):>22}{format_number(base.get('threshold')):>22}"
     )
     print(f"  (бейзлайн — {report.baseline_feature}: уверенность нынешнего порогового метода)")
+    if miss_cost is not None:
+        print(
+            f"  {'цена (меньше — лучше)':<24}{format_number(clf.get('cost')):>22}{format_number(base.get('cost')):>22}"
+        )
+        verdict = "классификатор остаётся" if report.cheaper_than_baseline_dev else "method: threshold"
+        print(
+            f"Правило рабочей точки (docs/DESIGN.md): цена классификатора строго меньше, чем у порога → {verdict}"
+        )
     _print_baseline_verdict(report)
 
     kind = "коэффициент (на стандартизованных признаках; + толкает к отказу)"

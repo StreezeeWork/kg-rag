@@ -19,6 +19,7 @@ from kbrag.eval.metrics import (
     citation_recall,
     cites_stale_document,
     coverage_matrix,
+    decision_cost,
     fact_recall,
     hit_at_k,
     match_terms,
@@ -483,6 +484,33 @@ def test_choose_threshold_is_deterministic_and_order_independent() -> None:
 def test_choose_threshold_length_mismatch() -> None:
     with pytest.raises(ValueError):
         choose_threshold([0.1], [True, False])
+
+
+# 8 вопросов с ответом и 2 без: у одного «без ответа» уверенность высокая (0.75), его не отсечь без 3 ложных отказов.
+COST_CONF = [0.9, 0.85, 0.8, 0.7, 0.65, 0.6, 0.95, 0.92, 0.75, 0.3]
+COST_ANS = [True, True, True, True, True, True, True, True, False, False]
+
+
+def test_cost_criterion_prices_errors_explicitly_instead_of_by_class_share() -> None:
+    # Balanced accuracy ловит оба «без ответа» ценой трёх ложных отказов: один пойманный «окупает» 8 / 2 = 4 отказа.
+    assert choose_threshold(COST_CONF, COST_ANS) == pytest.approx(0.775)
+    # Цена 2: поймать второй «без ответа» (−2) не стоит трёх ложных отказов (+3) — порог ниже, отказов меньше.
+    assert choose_threshold(COST_CONF, COST_ANS, miss_cost=2.0) == pytest.approx(0.45)
+    assert decision_cost(COST_CONF, COST_ANS, 0.45, 2.0) == 2.0  # 0 ложных отказов + 2 × 1 пропуск
+    assert decision_cost(COST_CONF, COST_ANS, 0.775, 2.0) == 3.0  # 3 ложных отказа + 0 пропусков
+    # Цена 3: обе точки стоят 3 — при ничьей выбирается меньший порог (реже отказ).
+    assert choose_threshold(COST_CONF, COST_ANS, miss_cost=3.0) == pytest.approx(0.45)
+    # Цена 4 = 8 / 2 — ровно та, что неявно у balanced accuracy здесь, и выбор совпадает.
+    assert choose_threshold(COST_CONF, COST_ANS, miss_cost=4.0) == pytest.approx(0.775)
+
+
+def test_cost_criterion_returns_none_when_never_refusing_is_cheapest() -> None:
+    # Единственный «без ответа» в середине: отсечь его — 3 ложных отказа, дороже, чем пропустить (0.5).
+    confidences = [0.9, 0.8, 0.5, 0.4, 0.3, 0.2]
+    answerable = [True, True, False, True, True, True]
+    assert choose_threshold(confidences, answerable, miss_cost=0.5) is None
+    with pytest.raises(ValueError, match="miss_cost"):
+        choose_threshold(COST_CONF, COST_ANS, miss_cost=0.0)
 
 
 # ---------------------------------------------------------------------------

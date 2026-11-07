@@ -352,9 +352,9 @@ def test_auto_threshold_is_chosen_only_on_dev(
 ) -> None:
     seen: list[tuple[list, list]] = []
 
-    def spy_choose_threshold(confidences, answerable):
+    def spy_choose_threshold(confidences, answerable, miss_cost=None):
         seen.append((list(confidences), list(answerable)))
-        return choose_threshold(confidences, answerable)
+        return choose_threshold(confidences, answerable, miss_cost)
 
     monkeypatch.setattr(runner, "choose_threshold", spy_choose_threshold)
     result = run_experiment(

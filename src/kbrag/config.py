@@ -118,6 +118,9 @@ class AbstentionConfig(_Strict):
     calibration_path: str | None = "reports/calibration.json"
     # Файл модели отказа (пишет `kbrag train-abstention`); свой для каждого конфига поиска.
     model_path: str | None = None
+    # Как подбирать порог на dev (и для threshold, и для порога классификатора). null — balanced accuracy;
+    # число — минимум цены «ложные отказы + miss_cost × ответы на вопросы без ответа» (docs/DESIGN.md).
+    miss_cost: float | None = Field(None, gt=0)
 
 
 class LTRConfig(_Strict):

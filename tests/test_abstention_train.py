@@ -22,6 +22,7 @@ from kbrag.abstention.train import (
     baseline_scores,
     choose_candidate,
     cross_validate,
+    evaluate_on_dev,
     fit_abstention,
     train_abstention,
     tune_decision_threshold,
@@ -255,6 +256,39 @@ def test_train_abstention_saves_a_model_the_service_accepts(
     # Рекомендация «переключаться ли» — по dev; флаг train-CV подписан как справочный.
     assert data["dev_metrics"]["beats_baseline_dev"] == report.beats_baseline_dev
     assert "beats_baseline_cv" in data["cv_report"] and "auroc_diff" in data["dev_metrics"]
+
+
+def test_evaluate_on_dev_reports_the_cost_of_both_branches() -> None:
+    # p — P(нет ответа) классификатора; бейзлайн — уверенность (больше — вероятнее ответ). y = 1 — нет ответа.
+    y = [0, 0, 0, 0, 1, 1]
+    p = [0.1, 0.2, 0.3, 0.6, 0.7, 0.9]
+    confidence = [0.9, 0.8, 0.4, 0.7, 0.6, 0.2]
+    dev = evaluate_on_dev(p, confidence, y, decision_threshold=0.65, miss_cost=2.0)
+    assert dev["classifier"]["cost"] == 0.0  # ни одного ложного отказа и ни одного пропуска
+    # Порог бейзлайна подобран тем же критерием: отсечь оба «без ответа» стоит одного ложного отказа
+    # (уверенность 0.4) — цена 1; отсечь только 0.2 и пропустить 0.6 — цена 2. Выбрано первое.
+    assert dev["baseline"]["cost"] == 1.0
+    report = TrainReport(
+        "logreg", {}, "logreg", "dense_top1", [], 0.65, dev, "coef", [], 4, 2, 6, 2, miss_cost=2.0
+    )
+    assert report.cheaper_than_baseline_dev is True
+    plain = evaluate_on_dev(p, confidence, y, decision_threshold=0.65)
+    assert "cost" not in plain["classifier"]  # без miss_cost — прежний отчёт
+
+
+def test_train_abstention_uses_the_cost_operating_point(
+    tmp_path: Path, mini_docs: list[Document], mini_gold_records: list[dict]
+) -> None:
+    cfg = make_cfg(tmp_path)
+    cfg = cfg.model_copy(update={"abstention": cfg.abstention.model_copy(update={"miss_cost": 2.0})})
+    gold = items([*mini_gold_records, DEV_UNANSWERABLE])
+    report = train_abstention(cfg, model="logreg", docs=mini_docs, train=items(train_records()), gold=gold)
+    assert report.miss_cost == 2.0
+    assert "cost" in report.dev["classifier"] and "cost" in report.dev["baseline"]
+    assert report.model_path is not None
+    data = json.loads(Path(report.model_path).read_text(encoding="utf-8"))
+    assert data["operating_point"]["criterion"] == "cost" and data["operating_point"]["miss_cost"] == 2.0
+    assert data["operating_point"]["cheaper_than_baseline_dev"] == report.cheaper_than_baseline_dev
 
 
 def test_train_abstention_rejects_train_that_overlaps_gold(

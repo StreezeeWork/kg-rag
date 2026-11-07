@@ -307,6 +307,7 @@ def _resolve_eval_threshold(cfg: AppConfig, runs: Sequence[_QuestionRun]) -> flo
     threshold = choose_threshold(
         [run.answer.confidence for run in dev],
         [run.item.answerable for run in dev],
+        abstention.miss_cost,  # None — balanced accuracy, число — цена ошибок (docs/DESIGN.md)
     )
     logger.info("Порог отказа подобран на %d dev-вопросах: %s", len(dev), threshold)
     return threshold

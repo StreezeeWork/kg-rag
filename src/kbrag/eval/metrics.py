@@ -414,8 +414,26 @@ def _balanced_accuracy(scores: Sequence[float], answerable: Sequence[bool], thre
     return (answered_ok / n_pos + rejected_ok / n_neg) / 2
 
 
-def choose_threshold(confidences: Sequence[float | None], answerable: Sequence[bool]) -> float | None:
+def decision_cost(
+    scores: Sequence[float], answerable: Sequence[bool], threshold: float, miss_cost: float
+) -> float:
+    """Цена решения при пороге: ложные отказы на вопросы с ответом + ``miss_cost`` × ответы на вопросы без ответа."""
+    pairs = list(zip(scores, answerable, strict=True))
+    false_refusals = sum(1 for s, ans in pairs if ans and s < threshold)
+    misses = sum(1 for s, ans in pairs if not ans and s >= threshold)
+    return false_refusals + miss_cost * misses
+
+
+def choose_threshold(
+    confidences: Sequence[float | None], answerable: Sequence[bool], miss_cost: float | None = None
+) -> float | None:
     """Подбирает порог уверенности: отвечаем, если ``confidence >= threshold``, иначе отказ.
+
+    ``miss_cost`` задаёт критерий. None (по умолчанию) — balanced accuracy, как описано ниже.
+    Число — минимум цены «ложные отказы + miss_cost × ответы на вопросы без ответа» (``decision_cost``):
+    цена ошибок задаётся явно, как продуктовое решение (docs/DESIGN.md, «Рабочая точка отказа»), а не
+    выводится из соотношения классов на dev. Кандидаты и правило ничьей те же; порога нет, если ни один
+    кандидат не дешевле «никогда не отказываться» (её цена — miss_cost × число вопросов без ответа).
 
     Критерий — balanced accuracy: неотвечаемых вопросов обычно мало, и обычная
     точность была бы максимальна при «никогда не отказываться».
@@ -447,6 +465,17 @@ def choose_threshold(confidences: Sequence[float | None], answerable: Sequence[b
     candidates = [(low + high) / 2 for low, high in itertools.pairwise(finite)]
     if finite and any(s == -math.inf for s in scores):
         candidates.insert(0, finite[0])
+
+    if miss_cost is not None:
+        if miss_cost <= 0:
+            raise ValueError(f"miss_cost должен быть > 0, получено {miss_cost}")
+        best_threshold = None
+        best_cost = miss_cost * (len(answerable) - n_pos)  # «никогда не отказываться»
+        for threshold in candidates:  # по возрастанию, поэтому при равенстве остаётся меньший
+            cost = decision_cost(scores, answerable, threshold, miss_cost)
+            if cost < best_cost - 1e-12:
+                best_threshold, best_cost = threshold, cost
+        return best_threshold
 
     best_threshold: float | None = None
     best_score = 0.5  # «никогда не отказываться»: все отвечаемые отвечены, все неотвечаемые — нет
