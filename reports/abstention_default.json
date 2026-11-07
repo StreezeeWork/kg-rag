@@ -23,7 +23,7 @@
     "q_cov_topk",
     "q_has_digits"
   ],
-  "decision_threshold": 0.4367616966797486,
+  "decision_threshold": 0.5575211779288718,
   "params": {
     "depth": 2
   },
@@ -136,12 +136,13 @@
         0.8178571428571428,
         0.9714285714285714
       ],
-      "threshold": 0.4367616966797486,
-      "balanced_accuracy": 0.861904761904762,
-      "abstain_precision": 0.6190476190476191,
-      "abstain_recall": 0.8666666666666667,
-      "abstain_f1": 0.7222222222222222,
-      "false_abstention_rate": 0.14285714285714285
+      "threshold": 0.5575211779288718,
+      "balanced_accuracy": 0.8464285714285715,
+      "abstain_precision": 0.6666666666666666,
+      "abstain_recall": 0.8,
+      "abstain_f1": 0.7272727272727272,
+      "false_abstention_rate": 0.10714285714285714,
+      "cost": 12.0
     },
     "baseline": {
       "auroc": 0.7928571428571428,
@@ -154,7 +155,8 @@
       "abstain_precision": 0.4444444444444444,
       "abstain_recall": 0.8,
       "abstain_f1": 0.5714285714285714,
-      "false_abstention_rate": 0.26785714285714285
+      "false_abstention_rate": 0.26785714285714285,
+      "cost": 21.0
     },
     "auroc_diff": {
       "value": 0.11071428571428577,
@@ -164,6 +166,11 @@
       ]
     },
     "beats_baseline_dev": false
+  },
+  "operating_point": {
+    "criterion": "cost",
+    "miss_cost": 2.0,
+    "cheaper_than_baseline_dev": true
   },
   "importance": {
     "kind": "mean_abs_shap",
@@ -250,7 +257,7 @@
       ]
     ]
   },
-  "created_at": "2026-11-06T23:09:16+00:00",
+  "created_at": "2026-11-07T06:18:01+00:00",
   "versions": {
     "python": "3.12.10",
     "kbrag": "0.1.0",
@@ -260,6 +267,6 @@
   },
   "catboost": {
     "file": "abstention_default.cbm",
-    "sha256": "2975998b5f8fefd8ba8a4a1f6e680d235fe771d51bd82ff9cfc6b2637c30690f"
+    "sha256": "53938d069917473a8e4ea3e9d8a1d8693985ce51273f341bb32c65db48de20b0"
   }
 }

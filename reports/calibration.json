@@ -3,6 +3,6 @@
   "score_source": "dense",
   "threshold": 0.8615069389343262,
   "corpus_sha256": "be5fe72bcb47f3a6",
-  "experiment": "default_threshold",
-  "created_at": "2026-11-06T23:19:11+00:00"
+  "experiment": "cost_threshold",
+  "created_at": "2026-11-07T06:26:26+00:00"
 }

@@ -92,6 +92,8 @@ abstention:
                         # упорядочивает фрагменты, но его score хуже отделяет вопросы без ответа. По test не выбираем.
   calibration_path: reports/calibration.json  # сервис читает порог отсюда, если конфиг поиска не менялся
   model_path: reports/abstention_default.json  # модель отказа для method: classifier (свой файл на каждый конфиг поиска)
+  miss_cost: 2          # рабочая точка: на dev минимум цены «ложные отказы + 2 × ответы на вопросы без ответа»
+                        # вместо balanced accuracy (та неявно ставит цену 56/15 ≈ 3.7). Правило — docs/DESIGN.md
 
 guardrails:
   enabled: true         # текст документов — данные, а не инструкции: ловим prompt injection во фрагментах
