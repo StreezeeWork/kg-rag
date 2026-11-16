@@ -15,7 +15,7 @@
 # Проще всего — через docker compose (см. docker-compose.yml) или `make docker-up`.
 # Нужен BuildKit (по умолчанию в Docker 23+ и Docker Desktop): ниже используется RUN --mount.
 
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 # PYTHONDONTWRITEBYTECODE — не создаём .pyc в образе; PYTHONUNBUFFERED — логи сразу видны в `docker logs`.
 ENV PYTHONDONTWRITEBYTECODE=1 \
